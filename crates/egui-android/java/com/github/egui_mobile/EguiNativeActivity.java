@@ -313,6 +313,14 @@ public class EguiNativeActivity extends NativeActivity {
         // egui draws Paste/Copy/Cut/Select-all; Android's ActionMode closes the IME on Select All.
         edit.setCustomSelectionActionModeCallback(NO_ACTION_MODE);
         edit.setCustomInsertionActionModeCallback(NO_ACTION_MODE);
+        // The two callbacks above kill the *standard* ActionMode, but some OEM shells (Samsung's
+        // among them) raise their own cut/copy/paste panel off a long-press on the focused field.
+        // That panel floats over the app's own input row. The hidden EditText is a keyboard proxy —
+        // egui owns every visible caret and selection — so a long-press on it has nothing to offer
+        // and is consumed here. `setTextIsSelectable(true)` is deliberately left alone: the IME
+        // bridge needs programmatic selection for the spacebar-trackpad cursor.
+        edit.setLongClickable(false);
+        edit.setOnLongClickListener(v -> true);
         // 1×1 on-screen (not off-screen): some IMEs refuse InputConnection for views outside the window.
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(1, 1);
         addContentView(edit, params);
