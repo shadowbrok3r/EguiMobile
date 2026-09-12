@@ -1574,11 +1574,16 @@ pub fn device_orientation_deg() -> Option<f32> {
     })
 }
 
-// Insets are read via `Resources` (Context method, thread-safe) rather than the View hierarchy —
-// `getRootWindowInsets`/`getDecorView` are View methods that MUST run on the UI thread and throw
-// `CalledFromWrongThreadException` from the render thread. `status_bar_height` covers the top
-// notch/camera region on virtually all phones; `navigation_bar_height` covers the bottom.
+// The real insets when the platform will tell us, the framework dimens when it will not.
+//
+// Neither path may touch the View hierarchy: `getRootWindowInsets`/`getDecorView` are View
+// methods that MUST run on the UI thread and throw `CalledFromWrongThreadException` from the
+// render thread. `WindowManager` is a system service, so `getCurrentWindowMetrics()` is safe
+// here — the same route `ime_inset_px` already takes.
 fn read_root_insets_px() -> Option<(f32, f32, f32, f32)> {
+    if let Some(real) = window_metrics_insets_px() {
+        return Some(real);
+    }
     with_activity(|env, activity| {
         let res = env
             .call_method(activity, "getResources", "()Landroid/content/res/Resources;", &[])?
@@ -1587,6 +1592,80 @@ fn read_root_insets_px() -> Option<(f32, f32, f32, f32)> {
         let bottom = android_dimen_px(env, &res, "navigation_bar_height")?;
         Ok((top, bottom, 0.0, 0.0))
     })
+}
+
+// The WindowMetrics inset probe is unavailable (API < 30 or a JNI failure).
+static WINDOW_INSETS_OFF: AtomicBool = AtomicBool::new(false);
+
+/// System bars **and display cutout**, in pixels, from `getCurrentWindowMetrics()`.
+///
+/// `status_bar_height` is a static framework dimen — 24dp on nearly every device — and on a phone
+/// with a tall camera cutout the unreachable strip is considerably deeper than that. The gap is
+/// invisible in a screenshot, because the app happily *paints* into it; what it costs is touches,
+/// which the system keeps. A control drawn there looks fine and does nothing. Measured on an
+/// API 36 AVD: dimen 84px, real cutout-inclusive inset 145px, so the top 61px of the app was
+/// painted and dead.
+///
+/// The bottom follows from the same call rather than `navigation_bar_height`, which reports the
+/// three-button bar's height even when the device is using gesture navigation.
+fn window_metrics_insets_px() -> Option<(f32, f32, f32, f32)> {
+    enum Probe {
+        Px(f32, f32, f32, f32),
+        NotReady,
+        Unsupported,
+    }
+    if WINDOW_INSETS_OFF.load(Ordering::Relaxed) {
+        return None;
+    }
+    let probe = with_activity(|env, activity| {
+        let sdk = env
+            .get_static_field("android/os/Build$VERSION", "SDK_INT", "I")?
+            .i()?;
+        if sdk < 30 {
+            return Ok(Probe::Unsupported);
+        }
+        let wm = env
+            .call_method(activity, "getWindowManager", "()Landroid/view/WindowManager;", &[])?
+            .l()?;
+        let metrics = env
+            .call_method(&wm, "getCurrentWindowMetrics", "()Landroid/view/WindowMetrics;", &[])?
+            .l()?;
+        let insets = env
+            .call_method(&metrics, "getWindowInsets", "()Landroid/view/WindowInsets;", &[])?
+            .l()?;
+        if insets.is_null() {
+            return Ok(Probe::NotReady);
+        }
+        let bars = env
+            .call_static_method("android/view/WindowInsets$Type", "systemBars", "()I", &[])?
+            .i()?;
+        let cutout = env
+            .call_static_method("android/view/WindowInsets$Type", "displayCutout", "()I", &[])?
+            .i()?;
+        let args = [JValue::Int(bars | cutout)];
+        let obj = env
+            .call_method(&insets, "getInsets", "(I)Landroid/graphics/Insets;", &args)?
+            .l()?;
+        let side = |env: &mut jni::JNIEnv, name: &str| -> jni::errors::Result<f32> {
+            Ok(env.get_field(&obj, name, "I")?.i()? as f32)
+        };
+        Ok(Probe::Px(
+            side(env, "top")?,
+            side(env, "bottom")?,
+            side(env, "left")?,
+            side(env, "right")?,
+        ))
+    });
+    match probe {
+        Some(Probe::Px(t, b, l, r)) => Some((t, b, l, r)),
+        // Before the window is attached every side reads zero; the dimens are the better answer
+        // for that frame, and this one is retried on the next.
+        Some(Probe::NotReady) => None,
+        Some(Probe::Unsupported) | None => {
+            WINDOW_INSETS_OFF.store(true, Ordering::Relaxed);
+            None
+        }
+    }
 }
 
 /// Look up a framework `dimen` resource (e.g. `status_bar_height`) in pixels; 0 if absent.

@@ -58,8 +58,11 @@ emulator is the cheap one: `cargo egui-mobile emulator boot`, `cargo egui-mobile
 — a release APK aborts on an emulator inside the `jni` crate before any app code runs, which is
 the emulator and not the build, so only a phone can confirm a release build works.
 
-A header or control drawn in the top `safe_area_insets().top` is **painted but not tappable**: the
-system status bar takes those touches. The desktop harness has no insets and will never show this.
+A control drawn inside `safe_area_insets()` is **painted but not tappable**: the system keeps those
+touches. The insets come from `getCurrentWindowMetrics()` and include the **display cutout**, not
+just the system bars — `status_bar_height` is a static 24dp dimen and a tall camera cutout is
+deeper (145px vs 84px on the s26ultra AVD), so trusting the dimen left the top 61px painted and
+dead. A desktop harness has no insets and will never show this.
 
 **Java changes** (`crates/egui-android/java/`) are otherwise only compiled at APK-package time.
 Check them in a second rather than at the end of a build:
