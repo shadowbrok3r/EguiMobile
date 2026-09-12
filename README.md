@@ -83,6 +83,48 @@ signing entry in the app's Cargo.toml (`[package.metadata.android.signing.releas
 `keystore_password`; pointing at `~/.android/debug.keystore` with password `android` is fine for
 sideloads).
 
+## Testing on an emulator
+
+An emulator is the only surface short of a phone with real insets, a real soft keyboard, real dpi
+and the platform's own networking. `cargo egui-mobile emulator` drives one:
+
+```bash
+cargo egui-mobile emulator list                     # AVDs this SDK knows about
+cargo egui-mobile emulator boot                     # start and wait for sys.boot_completed
+cargo egui-mobile emulator status                   # screen, density, abis, points-to-pixels
+cargo egui-mobile run -a                            # build + install + launch
+cargo egui-mobile emulator put settings.json my-app/settings.json
+cargo egui-mobile emulator shot /tmp/screen.png
+cargo egui-mobile emulator tap 25 41                # IN EGUI POINTS
+cargo egui-mobile emulator swipe 200 600 200 200 --ms 250
+cargo egui-mobile emulator text "hello"
+cargo egui-mobile emulator key back
+cargo egui-mobile emulator kill
+```
+
+Three things it handles that the bare `adb` equivalents get wrong:
+
+- **`tap`/`swipe` take egui points**, converted with the device's own density. `adb shell input
+  tap` wants physical pixels, so at 560dpi every coordinate is off by 3.5x — enough to land on a
+  neighbouring widget rather than miss outright.
+- **`put` writes into the app's private `files/`** with the right owner *and* the app's current
+  SELinux category. Each install picks a new category, so a file pushed as root keeps the previous
+  install's and every read is denied — silently, since an unreadable settings file looks exactly
+  like a missing one. `restorecon` does not help; it restores the default label, which has no
+  category. The package id comes from `package.metadata.android.package`, or `--package`.
+- **`boot` waits for `sys.boot_completed`**, not just `adb wait-for-device`, which returns while
+  the UI is still minutes away.
+
+**Install debug, not release.** A release APK aborts during `ANativeActivity_onCreate` with
+`Expected an exception after ExceptionCheck` out of the `jni` crate, before any app code runs. It
+is the emulator, not the build: an APK that runs on a phone crashes there, and the same commit in
+debug is fine. `run -a --release` warns when an emulator is attached. So an emulator can tell you
+about layout, insets, keyboard, lifecycle and networking — it cannot tell you a release build
+works.
+
+`put`, `get` and root-only operations need an emulator or a userdebug device; a production phone
+refuses `adb root`.
+
 ## Host capabilities
 
 The app talks to the platform through [`Host`]: `share_file`/`share_text`, `notify`,

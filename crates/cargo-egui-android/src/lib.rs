@@ -11,6 +11,9 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use clap::Args;
 
+pub mod emulator;
+pub use emulator::{EmulatorCmd, run as cmd_emulator};
+
 const TPL_CARGO: &str = include_str!("../template/Cargo.toml.tpl");
 const TPL_LIB: &str = include_str!("../template/lib.rs.tpl");
 const TPL_GITIGNORE: &str = include_str!("../template/gitignore.tpl");
@@ -190,7 +193,7 @@ pub fn normalize_tcp_serial(host: &str) -> String {
     format!("{host}:5555")
 }
 
-fn adb_path(env: &AndroidEnv) -> PathBuf {
+pub(crate) fn adb_path(env: &AndroidEnv) -> PathBuf {
     let candidate = env.sdk.join("platform-tools/adb");
     if candidate.is_file() {
         candidate
@@ -272,15 +275,15 @@ pub fn cmd_env() -> Result<()> {
     Ok(())
 }
 
-struct AndroidEnv {
-    sdk: PathBuf,
-    ndk: PathBuf,
-    java_home: Option<PathBuf>,
-    kotlin_home: Option<PathBuf>,
-    path: std::ffi::OsString,
+pub(crate) struct AndroidEnv {
+    pub(crate) sdk: PathBuf,
+    pub(crate) ndk: PathBuf,
+    pub(crate) java_home: Option<PathBuf>,
+    pub(crate) kotlin_home: Option<PathBuf>,
+    pub(crate) path: std::ffi::OsString,
 }
 
-fn resolve_android_env() -> Result<AndroidEnv> {
+pub(crate) fn resolve_android_env() -> Result<AndroidEnv> {
     let home = std::env::var("HOME").unwrap_or_default();
     let sdk = std::env::var_os("ANDROID_HOME")
         .or_else(|| std::env::var_os("ANDROID_SDK_ROOT"))
@@ -514,6 +517,9 @@ fn cmd_apk(sub: &str, args: &BuildArgs, device: Option<&str>) -> Result<()> {
     if !PathBuf::from("Cargo.toml").exists() {
         bail!("run from an egui-android app directory (no Cargo.toml here)");
     }
+    if sub == "run" && args.release {
+        warn_release_on_emulator();
+    }
     sync_java_sources()?;
     let mut cmd = Command::new("cargo");
     cmd.arg("apk2").arg(sub).arg("--target").arg("aarch64-linux-android");
@@ -542,6 +548,32 @@ fn cmd_apk(sub: &str, args: &BuildArgs, device: Option<&str>) -> Result<()> {
         bail!("cargo apk2 {sub} failed");
     }
     Ok(())
+}
+
+/// Say so when a release build is headed for an emulator, because it will abort on launch.
+///
+/// A release APK dies in `ANativeActivity_onCreate` with `Expected an exception after
+/// ExceptionCheck` out of the `jni` crate, before a line of app code runs. It is the emulator, not
+/// the build — the same APK runs on a phone and the same commit in debug runs on the emulator —
+/// but the crash names nothing recognisable, so it reads as "my app is broken".
+fn warn_release_on_emulator() {
+    let Ok(env) = resolve_android_env() else { return };
+    let Ok(out) = Command::new(adb_path(&env)).arg("devices").env("PATH", &env.path).output() else {
+        return;
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let emulator = text.lines().skip(1).any(|line| {
+        let mut parts = line.split_whitespace();
+        matches!((parts.next(), parts.next()), (Some(s), Some("device")) if s.starts_with("emulator-"))
+    });
+    if emulator {
+        eprintln!(
+            "warning: a release build aborts on an emulator during ANativeActivity_onCreate
+                      (`Expected an exception after ExceptionCheck`, from the jni crate) before
+                      any app code runs. Drop --release to test here; only a phone can tell you
+                      a release build works."
+        );
+    }
 }
 
 #[cfg(test)]

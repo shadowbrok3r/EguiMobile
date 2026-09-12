@@ -62,6 +62,11 @@ enum Cmd {
     },
     /// Android: stream filtered device logs (`adb logcat`) with the resolved SDK env.
     Logcat(cargo_egui_android::LogcatArgs),
+    /// Android: drive an emulator — boot, kill, screenshot, tap in egui points, seed app files.
+    Emulator {
+        #[command(subcommand)]
+        cmd: cargo_egui_android::EmulatorCmd,
+    },
     /// Print shell exports for the Android toolchain (SDK/NDK/JDK/Kotlin).
     ///
     /// For bare `cargo apk2`: `eval "$(cargo egui-mobile env -a)"`.
@@ -159,6 +164,7 @@ fn main() -> Result<()> {
         }
         Cmd::AdbConnect { host } => cargo_egui_android::cmd_adb_connect(&host),
         Cmd::Logcat(args) => cargo_egui_android::cmd_logcat(&args),
+        Cmd::Emulator { cmd } => cargo_egui_android::cmd_emulator(&cmd),
         Cmd::Env { platform } => {
             if platform.ios {
                 anyhow::bail!("env is Android-only; use -a/--android");

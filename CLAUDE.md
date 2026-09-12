@@ -52,6 +52,15 @@ Compare the warning count against the pre-change baseline rather than only looki
 new dead code means something was left unwired. Host-side logic is covered by
 `cargo test -p <crate>` and should stay green.
 
+**Anything about layout, insets, the keyboard, lifecycle or networking needs a device**, and the
+emulator is the cheap one: `cargo egui-mobile emulator boot`, `cargo egui-mobile run -a`, then
+`emulator shot` / `tap` / `key` to drive it. `tap` takes **egui points**, not pixels. Install debug
+— a release APK aborts on an emulator inside the `jni` crate before any app code runs, which is
+the emulator and not the build, so only a phone can confirm a release build works.
+
+A header or control drawn in the top `safe_area_insets().top` is **painted but not tappable**: the
+system status bar takes those touches. The desktop harness has no insets and will never show this.
+
 **Java changes** (`crates/egui-android/java/`) are otherwise only compiled at APK-package time.
 Check them in a second rather than at the end of a build:
 
