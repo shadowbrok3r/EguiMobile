@@ -91,6 +91,7 @@ and the platform's own networking. `cargo egui-mobile emulator` drives one:
 ```bash
 cargo egui-mobile emulator list                     # AVDs this SDK knows about
 cargo egui-mobile emulator boot                     # start and wait for sys.boot_completed
+cargo egui-mobile emulator boot --headless          # no window, for a host with no usable X display
 cargo egui-mobile emulator status                   # screen, density, abis, points-to-pixels
 cargo egui-mobile run -a                            # build + install + launch
 cargo egui-mobile emulator put settings.json my-app/settings.json
@@ -113,7 +114,12 @@ Three things it handles that the bare `adb` equivalents get wrong:
   like a missing one. `restorecon` does not help; it restores the default label, which has no
   category. The package id comes from `package.metadata.android.package`, or `--package`.
 - **`boot` waits for `sys.boot_completed`**, not just `adb wait-for-device`, which returns while
-  the UI is still minutes away.
+  the UI is still minutes away — and it watches the emulator process while it waits, so a startup
+  failure is reported instead of hanging until the deadline. The emulator's output goes to
+  `$TMPDIR/egui-mobile-emulator.log` and the last lines of it come back in the error, because the
+  reasons it refuses to start (no usable X display, a GPU it will not render on, a stale lock) are
+  things it only ever says on stderr. `--headless` sidesteps the display question entirely;
+  screenshots and input still work, since both go through adb.
 
 **Install debug, not release.** A release APK aborts during `ANativeActivity_onCreate` with
 `Expected an exception after ExceptionCheck` out of the `jni` crate, before any app code runs. It

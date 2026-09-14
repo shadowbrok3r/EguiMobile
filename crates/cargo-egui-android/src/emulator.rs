@@ -38,6 +38,10 @@ pub enum EmulatorCmd {
         /// Do not restart adbd as root after boot.
         #[arg(long)]
         no_root: bool,
+        /// No emulator window, software rendering. Needed wherever there is no usable X display —
+        /// screenshots and input still work, since both go through adb.
+        #[arg(long)]
+        headless: bool,
     },
     /// Shut the running emulator down.
     Kill,
@@ -90,8 +94,8 @@ pub fn run(cmd: &EmulatorCmd) -> Result<()> {
     let env = resolve_android_env()?;
     match cmd {
         EmulatorCmd::List => list(&env),
-        EmulatorCmd::Boot { avd, cold, wipe, no_root } => {
-            boot(&env, avd.as_deref(), *cold, *wipe, !*no_root)
+        EmulatorCmd::Boot { avd, cold, wipe, no_root, headless } => {
+            boot(&env, avd.as_deref(), *cold, *wipe, !*no_root, *headless)
         }
         EmulatorCmd::Kill => kill(&env),
         EmulatorCmd::Status => status(&env),
@@ -170,39 +174,51 @@ fn pick_avd(env: &AndroidEnv, asked: Option<&str>) -> Result<String> {
     }
 }
 
-fn boot(env: &AndroidEnv, avd: Option<&str>, cold: bool, wipe: bool, root: bool) -> Result<()> {
+fn boot(
+    env: &AndroidEnv,
+    avd: Option<&str>,
+    cold: bool,
+    wipe: bool,
+    root: bool,
+    headless: bool,
+) -> Result<()> {
     if let Some(serial) = running(env)? {
         println!("{serial} is already running");
         return Ok(());
     }
     let name = pick_avd(env, avd)?;
     println!("starting {name}");
+    let log_path = std::env::temp_dir().join("egui-mobile-emulator.log");
+    let log = std::fs::File::create(&log_path)
+        .with_context(|| format!("creating {}", log_path.display()))?;
     let mut cmd = Command::new(emulator_bin(env));
-    cmd.arg("-avd").arg(&name).arg("-no-boot-anim");
+    cmd.arg("-avd").arg(&name).arg("-no-boot-anim").arg("-no-metrics");
     if cold {
         cmd.arg("-no-snapshot-load");
     }
     if wipe {
         cmd.arg("-wipe-data");
     }
-    // Detached, with its output discarded: this returns once Android is up, and the emulator
-    // outlives it.
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    cmd.env("PATH", &env.path);
-    cmd.spawn().context("spawning the emulator")?;
-
-    let adb = adb_path(env);
-    let mut wait = Command::new(&adb);
-    wait.arg("wait-for-device").env("PATH", &env.path);
-    let status = wait.status().context("running adb wait-for-device")?;
-    if !status.success() {
-        bail!("adb wait-for-device failed");
+    if headless {
+        cmd.arg("-no-window").arg("-gpu").arg("swiftshader_indirect");
     }
-    // `wait-for-device` returns as soon as adbd answers, which is long before the UI exists.
-    // `sys.boot_completed` is the property that means Android is actually up.
+    // Output goes to a log rather than /dev/null. The emulator fails for reasons it only ever says
+    // on stderr — no usable X display, a GPU it will not render on, a stale lock — and discarding
+    // that leaves a boot that simply never happens with nothing to read.
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::from(log.try_clone().context("duplicating the log handle")?))
+        .stderr(Stdio::from(log));
+    cmd.env("PATH", &env.path);
+    let mut child = cmd.spawn().context("spawning the emulator")?;
+
+    // `wait-for-device` blocks forever if the emulator died on startup, so the child is watched
+    // alongside it rather than waited on blindly.
     let deadline = Instant::now() + Duration::from_secs(300);
     while Instant::now() < deadline {
-        if getprop(env, "sys.boot_completed")? == "1" {
+        if let Some(status) = child.try_wait().context("checking on the emulator")? {
+            bail!("the emulator exited ({status}) before Android booted{}", log_tail(&log_path));
+        }
+        if running(env)?.is_some() && getprop(env, "sys.boot_completed")? == "1" {
             if root {
                 let _ = adb_out(env, &["root"]);
             }
@@ -211,7 +227,24 @@ fn boot(env: &AndroidEnv, avd: Option<&str>, cold: bool, wipe: bool, root: bool)
         }
         std::thread::sleep(Duration::from_secs(2));
     }
-    bail!("emulator did not finish booting within 5 minutes")
+    bail!("the emulator did not finish booting within 5 minutes{}", log_tail(&log_path));
+}
+
+/// The last few meaningful lines of the emulator log, for an error message.
+fn log_tail(path: &Path) -> String {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("##") && !l.contains("metrics"))
+        .collect();
+    let keep: Vec<&str> = lines.iter().rev().take(6).rev().copied().collect();
+    if keep.is_empty() {
+        return format!("\n(nothing logged; see {})", path.display());
+    }
+    format!("\n{}\n(full log: {})", keep.join("\n"), path.display())
 }
 
 fn kill(env: &AndroidEnv) -> Result<()> {
