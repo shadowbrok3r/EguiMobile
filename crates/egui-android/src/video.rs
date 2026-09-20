@@ -9,7 +9,9 @@
 //!   path can't open.
 //!
 //! Neither needs a Context — both open a plain file path — so this works from any attached thread.
-//! Frames come back as raw RGBA ready for an egui texture. Audio is not decoded.
+//! Frames come back as raw RGBA ready for an egui texture. The file's sound is [`Audio`], a
+//! surfaceless `MediaPlayer` alongside them, whose playback position doubles as the clock frames
+//! are paced against.
 
 use jni::objects::{GlobalRef, JByteBuffer, JObject, JString, JValue};
 use jni::{JNIEnv, JavaVM};
@@ -98,6 +100,20 @@ impl Source {
                 let count = ((info.duration_ms as f64 / 1000.0) * info.fps as f64).ceil() as i32;
                 *next = ((ms as f64 / 1000.0 * info.fps.max(1.0) as f64) as i32)
                     .clamp(0, count.max(1) - 1);
+            }
+        }
+    }
+
+    /// Decode forward from wherever the stream is, discarding frames without converting them,
+    /// until `ms`. The catch-up path when presentation has fallen behind the audio clock — unlike
+    /// [`Source::seek`] it neither flushes the decoder nor moves the extractor backwards.
+    pub fn skip_to(&mut self, ms: i64) {
+        match self {
+            Source::Codec(c) => c.seek_target_us = c.seek_target_us.max(ms * 1000),
+            Source::Frames { info, next, .. } => {
+                let count = ((info.duration_ms as f64 / 1000.0) * info.fps as f64).ceil() as i32;
+                let at = (ms as f64 / 1000.0 * info.fps.max(1.0) as f64) as i32;
+                *next = (*next).max(at.clamp(0, count.max(1) - 1));
             }
         }
     }
@@ -715,6 +731,163 @@ fn meta_i64(env: &mut JNIEnv, retriever: &JObject, key_const: &str) -> Option<i6
         Err(_) => {
             let _ = env.exception_clear();
             None
+        }
+    }
+}
+
+// ── Audio track (MediaPlayer) ────────────────────────────────────────────────
+
+/// The file's sound, played by a `MediaPlayer` with no surface attached: it renders the audio
+/// track and leaves the video one to [`Source`]. Its playback position is the clock frames are
+/// paced against, so the two stay together without a shared timebase.
+pub struct Audio {
+    player: GlobalRef,
+}
+
+impl Audio {
+    /// Open `path`'s audio track, prepared and sitting at 0 — call [`Audio::play`] to start it.
+    /// `None` when the file carries no audio, or `MediaPlayer` won't take it.
+    pub fn open(env: &mut JNIEnv, path: &str) -> Option<Audio> {
+        if !has_audio_track(env, path) {
+            return None;
+        }
+        let opened = env.with_local_frame::<_, Option<GlobalRef>, jni::errors::Error>(8, |env| {
+            let player = env.new_object("android/media/MediaPlayer", "()V", &[])?;
+            let jpath = env.new_string(path)?;
+            let abandon = |env: &mut JNIEnv, p: &JObject, what: &str| {
+                clear_exception(env, what);
+                let _ = env.call_method(p, "release", "()V", &[]);
+                let _ = env.exception_clear();
+            };
+            if env
+                .call_method(&player, "setDataSource", "(Ljava/lang/String;)V", &[(&jpath).into()])
+                .is_err()
+            {
+                abandon(env, &player, "MediaPlayer.setDataSource");
+                return Ok(None);
+            }
+            if env.call_method(&player, "prepare", "()V", &[]).is_err() {
+                abandon(env, &player, "MediaPlayer.prepare");
+                return Ok(None);
+            }
+            Ok(Some(env.new_global_ref(&player)?))
+        });
+        match opened {
+            Ok(v) => v.map(|player| Audio { player }),
+            Err(e) => {
+                clear_exception(env, "Audio::open");
+                log::error!("video: audio open {path} failed: {e:?}");
+                None
+            }
+        }
+    }
+
+    pub fn play(&self, env: &mut JNIEnv) {
+        self.void_call(env, "start");
+    }
+
+    pub fn pause(&self, env: &mut JNIEnv) {
+        self.void_call(env, "pause");
+    }
+
+    /// False once the track has run out, as well as while paused — a finished player's position
+    /// stops advancing, so a caller pacing against it must stop reading the clock.
+    pub fn is_playing(&self, env: &mut JNIEnv) -> bool {
+        let playing =
+            env.call_method(self.player.as_obj(), "isPlaying", "()Z", &[]).and_then(|v| v.z());
+        let _ = env.exception_clear();
+        playing.unwrap_or(false)
+    }
+
+    /// How far into the track playback has got, in milliseconds.
+    pub fn position_ms(&self, env: &mut JNIEnv) -> i64 {
+        let ms = env
+            .call_method(self.player.as_obj(), "getCurrentPosition", "()I", &[])
+            .and_then(|v| v.i());
+        let _ = env.exception_clear();
+        ms.unwrap_or(0).max(0) as i64
+    }
+
+    /// Jump to `ms`, and don't return until the player's own clock agrees (or 200ms pass). A
+    /// position still reporting from before the jump is a trap for anything pacing against it: at
+    /// the top of a loop it reads a whole clip ahead of the picture.
+    pub fn seek(&self, env: &mut JNIEnv, ms: i64) {
+        let target = ms.clamp(0, i32::MAX as i64);
+        let _ = env.call_method(
+            self.player.as_obj(),
+            "seekTo",
+            "(I)V",
+            &[JValue::Int(target as i32)],
+        );
+        let _ = env.exception_clear();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        while (self.position_ms(env) - target).abs() > 500 {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// 0.0 silences the track while it keeps running — which is what muting has to do, since the
+    /// clock the video follows is its playback position.
+    pub fn set_volume(&self, env: &mut JNIEnv, volume: f32) {
+        let v = volume.clamp(0.0, 1.0);
+        let _ = env.call_method(
+            self.player.as_obj(),
+            "setVolume",
+            "(FF)V",
+            &[JValue::Float(v), JValue::Float(v)],
+        );
+        let _ = env.exception_clear();
+    }
+
+    pub fn release(&self, env: &mut JNIEnv) {
+        self.void_call(env, "stop");
+        self.void_call(env, "release");
+    }
+
+    /// One no-arg `MediaPlayer` method, with any exception cleared — several of them throw from a
+    /// state the caller can't see (`stop` after an error), and the next call must not inherit it.
+    fn void_call(&self, env: &mut JNIEnv, method: &str) {
+        let _ = env.call_method(self.player.as_obj(), method, "()V", &[]);
+        let _ = env.exception_clear();
+    }
+}
+
+/// Does `path` carry an audio track? `MediaPlayer` prepares a silent file just as happily, and its
+/// clock then never advances, so this has to be settled before anything is paced against it.
+fn has_audio_track(env: &mut JNIEnv, path: &str) -> bool {
+    let found = env.with_local_frame::<_, bool, jni::errors::Error>(16, |env| {
+        let extractor = env.new_object("android/media/MediaExtractor", "()V", &[])?;
+        let jpath = env.new_string(path)?;
+        if env
+            .call_method(&extractor, "setDataSource", "(Ljava/lang/String;)V", &[(&jpath).into()])
+            .is_err()
+        {
+            clear_exception(env, "MediaExtractor.setDataSource (audio probe)");
+            let _ = env.call_method(&extractor, "release", "()V", &[]);
+            return Ok(false);
+        }
+        let count = env.call_method(&extractor, "getTrackCount", "()I", &[])?.i()?;
+        let mut found = false;
+        for i in 0..count {
+            let f = env
+                .call_method(&extractor, "getTrackFormat", "(I)Landroid/media/MediaFormat;", &[JValue::Int(i)])?
+                .l()?;
+            if format_string(env, &f, "mime").is_some_and(|m| m.starts_with("audio/")) {
+                found = true;
+                break;
+            }
+        }
+        let _ = env.call_method(&extractor, "release", "()V", &[]);
+        Ok(found)
+    });
+    match found {
+        Ok(v) => v,
+        Err(_) => {
+            clear_exception(env, "has_audio_track");
+            false
         }
     }
 }

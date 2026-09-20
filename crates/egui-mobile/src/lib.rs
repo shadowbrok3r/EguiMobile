@@ -46,7 +46,7 @@ pub use egui_android::ScreenOrientation;
 #[cfg(target_os = "android")]
 pub use egui_android::device_orientation_deg;
 
-/// Android-only frame-accurate video decoding (MediaMetadataRetriever) for in-app playback.
+/// Android-only video decode (MediaCodec) plus the file's audio track, for in-app playback.
 #[cfg(target_os = "android")]
 pub use egui_android::video;
 
