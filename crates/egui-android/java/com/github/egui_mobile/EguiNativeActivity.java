@@ -438,6 +438,60 @@ public class EguiNativeActivity extends NativeActivity {
     /** Apply DEL/FORWARD_DEL to the hidden Editable: composing span, else selection, else one
      * code point — the same range egui deletes for the key from the native queue.
      * Returns {deletedCodePoints, spanStartCodePoint} so Rust can delete the identical range. */
+    /** One code point deleted from inside the live composing span, returning the span's new text
+     *  — or null when the caret is not inside one and the caller should delete normally.
+     *
+     *  A DEL key while a word is composing is a backspace within that word, not a request to drop
+     *  it: keyboards that shorten the composition themselves say so with setComposingText, and
+     *  this is the same event by a different route. Deleting the whole span (which is what the
+     *  caret-and-composing union in {@link #mirrorDeleteKey} does) loses the whole word on the
+     *  first backspace of any un-accepted suggestion. */
+    String mirrorDeleteInComposition(boolean backspace) {
+        EditText edit = imeEdit;
+        Editable ed = edit != null ? edit.getText() : null;
+        if (ed == null) {
+            return null;
+        }
+        int a = Math.max(0, edit.getSelectionStart());
+        int b = Math.max(0, edit.getSelectionEnd());
+        // A real selection is deleted wholesale, composing or not.
+        if (a != b) {
+            return null;
+        }
+        int cs = BaseInputConnection.getComposingSpanStart(ed);
+        int ce = BaseInputConnection.getComposingSpanEnd(ed);
+        if (cs < 0 || ce < cs) {
+            return null;
+        }
+        int from;
+        int to;
+        if (backspace) {
+            // At the span's start there is nothing of the word behind the caret: that delete
+            // belongs to the text before it, which the caller handles.
+            if (a <= cs) {
+                return null;
+            }
+            from = Character.offsetByCodePoints(ed, a, -1);
+            to = a;
+        } else {
+            if (a >= ce) {
+                return null;
+            }
+            from = a;
+            to = Character.offsetByCodePoints(ed, a, 1);
+        }
+        suppressSelectionEnqueue = true;
+        try {
+            ed.delete(from, to);
+            // The span follows its own text; an emptied one may be dropped entirely.
+            int ns = BaseInputConnection.getComposingSpanStart(ed);
+            int ne = BaseInputConnection.getComposingSpanEnd(ed);
+            return ns >= 0 && ne >= ns ? ed.subSequence(ns, ne).toString() : "";
+        } finally {
+            suppressSelectionEnqueue = false;
+        }
+    }
+
     int[] mirrorDeleteKey(boolean backspace) {
         EditText edit = imeEdit;
         Editable ed = edit != null ? edit.getText() : null;

@@ -279,6 +279,15 @@ public class EguiImeBridge extends InputConnectionWrapper {
             int code = event.getKeyCode();
             if (code == KeyEvent.KEYCODE_DEL || code == KeyEvent.KEYCODE_FORWARD_DEL) {
                 if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                    // Inside a composing word this is a backspace within that word. Shipped as a
+                    // composition update — the shape a keyboard uses when it shortens a word
+                    // itself — so egui's preedit loses one character instead of all of them.
+                    String shortened = activity.mirrorDeleteInComposition(code == KeyEvent.KEYCODE_DEL);
+                    if (shortened != null) {
+                        activity.enqueue("C\t" + shortened);
+                        if (TRACE) trace("sendKeyEvent(" + KeyEvent.keyCodeToString(code) + ") composing -> \"" + clip(shortened) + "\"");
+                        return true;
+                    }
                     // Ships the exact deleted span so egui removes the same range instead of
                     // one char at its own (possibly drifted) caret.
                     int[] span = activity.mirrorDeleteKey(code == KeyEvent.KEYCODE_DEL);
