@@ -5,7 +5,7 @@
 
 pub use android_activity::AndroidApp;
 pub use egui;
-pub use egui_mobile_core::{CreateContext, EguiApp, Haptic, Host, Insets, Permission};
+pub use egui_mobile_core::{CreateContext, EguiApp, Haptic, Host, Insets, Permission, overflow};
 
 /// Adapts an [`EguiApp`] + [`Host`] to `eframe::App`. Each frame it opens a central panel, hands
 /// the root `ui` to the app, then drains queued host requests (JNI dispatch lives in `host`).
@@ -187,6 +187,7 @@ impl eframe::App for Adapter {
             r.max.x -= insets.right;
             r.max.y -= insets.bottom;
         }
+        egui_mobile_core::overflow::set_content_bounds(ui.ctx(), rect);
         ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
             self.app.update(ui, &self.host);
         });
@@ -677,6 +678,8 @@ pub fn run_with_depth(
             // default — comfyui and privaxy each carry a workaround calling their own `apply` from
             // `update`, which costs a frame of unstyled UI and only fixed those two.
             app.theme(&cc.egui_ctx);
+            // Debug builds only: reports any widget clipped by the content edge.
+            egui_mobile_core::overflow::install(&cc.egui_ctx);
             Ok(Box::new(Adapter {
                 app,
                 host: Host::new(),

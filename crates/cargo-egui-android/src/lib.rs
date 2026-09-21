@@ -52,6 +52,10 @@ pub struct LogcatArgs {
     /// Clear the device log buffer before streaming.
     #[arg(long)]
     pub clear: bool,
+    /// Dump the UI overflow reports logged so far and exit non-zero if there are any, instead of
+    /// streaming. Debug builds only: the guard is compiled out of a release build.
+    #[arg(long)]
+    pub check_ui: bool,
 }
 
 fn ident(name: &str) -> String {
@@ -127,7 +131,12 @@ pub fn cmd_adb_connect(host: &str) -> Result<()> {
 }
 
 /// Default logcat tags: the comfyui in-app logger plus the QNN/local-sd self-test targets.
-const DEFAULT_LOGCAT_TAGS: &[&str] = &["comfyui", "local_sd", "qnn_rs", "egui-android"];
+const DEFAULT_LOGCAT_TAGS: &[&str] =
+    &["comfyui", "local_sd", "qnn_rs", "egui-android", OVERFLOW_TAG];
+
+/// Logcat tag of the debug-only UI overflow guard: android_logger tags a record with its module
+/// path, not its `log` target.
+const OVERFLOW_TAG: &str = "egui_mobile_core::overflow";
 
 /// Stream device logs (blocks until interrupted) with the resolved SDK env, allowlisting the
 /// app + self-test tags so a diagnostic printed via `log`/`android_logger` is easy to read back.
@@ -149,6 +158,9 @@ pub fn cmd_logcat(args: &LogcatArgs) -> Result<()> {
         clear.arg("logcat").arg("-c").env("PATH", &env.path);
         let _ = clear.status();
     }
+    if args.check_ui {
+        return check_ui(&adb, &env.path, serial.as_deref());
+    }
     let specs: Vec<String> = if args.tags.is_empty() {
         DEFAULT_LOGCAT_TAGS.iter().map(|t| format!("{t}:V")).collect()
     } else {
@@ -169,6 +181,31 @@ pub fn cmd_logcat(args: &LogcatArgs) -> Result<()> {
         bail!("adb logcat exited with failure");
     }
     Ok(())
+}
+
+/// Read back the UI overflow reports in the log buffer and fail if the UI was clipped anywhere.
+/// Run it after exercising the app; `--clear` first to scope the check to what follows.
+fn check_ui(adb: &Path, path: &std::ffi::OsStr, serial: Option<&str>) -> Result<()> {
+    let mut cmd = Command::new(adb);
+    if let Some(s) = serial {
+        cmd.arg("-s").arg(s);
+    }
+    // The whole buffer, filtered on the message: a report is recognisable without its tag.
+    cmd.arg("logcat").arg("-d").env("PATH", path);
+    let out = cmd.output().context("running adb logcat (is platform-tools installed?)")?;
+    if !out.status.success() {
+        bail!("adb logcat exited with failure");
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let hits: Vec<&str> = text.lines().filter(|l| l.contains("UI_OVERFLOW")).collect();
+    if hits.is_empty() {
+        println!("No UI overflow reported. (Debug build required: the guard is compiled out of release.)");
+        return Ok(());
+    }
+    for line in &hits {
+        println!("{line}");
+    }
+    bail!("{} UI overflow report(s): a widget is clipped by the screen edge", hits.len())
 }
 
 /// Append `:5555` when the host has no port.

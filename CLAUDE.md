@@ -73,6 +73,29 @@ cd crates/egui-android/java
   -classpath ~/Android/Sdk/platforms/android-35/android.jar -d /tmp/javacheck com/github/egui_mobile/*.java
 ```
 
+## UI that runs past the screen edge
+
+egui clips a widget that lands past the edge instead of failing, and the emulator/phone is the
+only place it shows. `egui-mobile-core/src/overflow.rs` is a debug-only `egui::Plugin` that both
+runtimes install for every app: each pass it walks the widget rects, and anything crossing the
+left/right edge of the rect the app was given is stroked red on screen, labelled with the text
+painted inside it, and logged as `UI_OVERFLOW` under the `ui_overflow` tag.
+
+A clipped widget is a bug to fix, not a warning to note. After exercising a UI change on a device:
+
+```bash
+cargo egui-mobile logcat --check-ui   # exits non-zero, printing every UI_OVERFLOW line
+```
+
+- It needs a **debug** build; `cfg!(debug_assertions)` compiles the whole guard out of release.
+- `overflow::set_policy(ctx, Policy::Panic)` in `on_start` turns the first overflow into a panic.
+  `EGUI_UI_OVERFLOW=panic|off` does the same where env vars reach the process (iOS, a desktop
+  harness); an Android app does not inherit the shell's environment.
+- Deliberate horizontal overflow (a horizontal `ScrollArea`) is excused by calling
+  `egui_mobile::overflow::allow(ui)` inside it — do that rather than ignoring the report.
+- Vertical edges are not checked: a scrolled list always has a half-cut row at the viewport edge.
+- `overflow::take_reports(ctx)` drains the same messages for an in-app debug panel or a host test.
+
 ## The AI toolchain
 
 The QNN/QAIRT SDK, conversion venv and host runtime live under `~/Documents/Ai/QNN/`

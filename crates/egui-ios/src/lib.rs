@@ -15,7 +15,7 @@ pub mod plugins;
 pub mod __ffi;
 
 /// The app-author API, re-exported from the platform-neutral core.
-pub use egui_mobile_core::{CreateContext, EguiApp, Haptic, Host, Insets, Permission};
+pub use egui_mobile_core::{CreateContext, EguiApp, Haptic, Host, Insets, Permission, overflow};
 pub use render_core::RenderCore;
 
 /// The default egui visual theme (near-black surfaces, pink/purple accents). Applied to the

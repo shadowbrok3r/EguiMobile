@@ -8,3 +8,5 @@ repository.workspace = true
 
 [dependencies]
 egui.workspace = true
+# The overflow guard reports through `log`; the platform runtimes route it to logcat / oslog.
+log.workspace = true
