@@ -12,6 +12,9 @@ pub const CHANGELOG: &str = "📜";
 pub const INSTALL: &str = "⬇";
 pub const DOT: &str = "•";
 pub const WARN: &str = "⚠";
+pub const CHECK: &str = "✔";
+pub const CLOSE: &str = "✖";
+pub const QUEUED: &str = "…";
 
 /// Every icon constant, for the font-coverage test.
 #[cfg(test)]
@@ -22,6 +25,9 @@ const ALL: &[(&str, &str)] = &[
     ("INSTALL", INSTALL),
     ("DOT", DOT),
     ("WARN", WARN),
+    ("CHECK", CHECK),
+    ("CLOSE", CLOSE),
+    ("QUEUED", QUEUED),
 ];
 
 #[cfg(test)]

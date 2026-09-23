@@ -3,7 +3,7 @@ name = "appstore_android"
 # Android versionCode is derived from this: (1<<24)|(major<<16)|(minor<<8)|patch.
 # BUMP IT before every release build — the phone only offers an update whose code is strictly
 # greater than the installed one, so shipping twice at the same version is a silent no-op.
-version = "0.1.6"
+version = "0.2.0"
 edition = "2024"
 publish = false
 
@@ -37,6 +37,12 @@ sha2 = { version = "0.10", default-features = false }
 log = "0.4"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 webpki-roots = { version = "0.26", optional = true }
+
+# Backdrop blur behind the detail sheet; glow-only, hence Backend::Glow in app.rs.
+[target.'cfg(target_os = "android")'.dependencies]
+backdrop-blur-egui = { path = "../../patches/backdrop-blur/crates/backdrop-blur-egui", default-features = false, features = [
+    "grab-pass",
+] }
 
 # cargo-apk2 reads this to generate the APK manifest.
 [package.metadata.android]
