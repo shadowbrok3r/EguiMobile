@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.2.0 — 2026-09-23
+
+Galactic glass theme matching comfyui and zc-codex. Apps show as a 2- or 3-column tile grid with update badges (or the old list); tap a tile for details. Apps with updates are pinned to the top, and Update all installs every pending update in one go.
+
 ## v0.1.6 — 2026-08-05
 
 egui 0.36: collapsed bottom bars no longer leave an invisible drag strip at the screen edge, and password fields now tell the keyboard not to learn them
