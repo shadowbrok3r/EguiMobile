@@ -6,6 +6,7 @@ pub use egui;
 
 mod app;
 mod host;
+pub mod keyboard;
 pub mod overflow;
 
 pub use app::{CreateContext, EguiApp};

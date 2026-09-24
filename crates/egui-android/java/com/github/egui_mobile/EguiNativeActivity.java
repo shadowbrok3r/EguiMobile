@@ -47,6 +47,11 @@ public class EguiNativeActivity extends NativeActivity {
     private boolean imeInsetVisible;
     /** Focused field is a password (egui IMEOutput.purpose); read by onCreateInputConnection. */
     private volatile boolean imePassword;
+    /** {@link #setImeKind} codes, matching egui-android's ime_bridge::set_ime_kind. */
+    static final int IME_KIND_TEXT = 0;
+    static final int IME_KIND_NUMBER = 1;
+    /** Keyboard kind the app marked the focused field with; read by onCreateInputConnection. */
+    private volatile int imeKind = IME_KIND_TEXT;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -273,6 +278,17 @@ public class EguiNativeActivity extends NativeActivity {
                 if (self.imePassword) {
                     outAttrs.imeOptions =
                             outAttrs.imeOptions | EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING;
+                } else if (self.imeKind == IME_KIND_NUMBER) {
+                    // Signed decimal keypad whose action key reads Done.
+                    outAttrs.inputType =
+                            InputType.TYPE_CLASS_NUMBER
+                                    | InputType.TYPE_NUMBER_FLAG_DECIMAL
+                                    | InputType.TYPE_NUMBER_FLAG_SIGNED;
+                    outAttrs.imeOptions =
+                            (outAttrs.imeOptions
+                                            & ~(EditorInfo.IME_MASK_ACTION
+                                                    | EditorInfo.IME_FLAG_NO_ENTER_ACTION))
+                                    | EditorInfo.IME_ACTION_DONE;
                 }
                 if (TRACE) Log.i("EguiIme", "onCreateInputConnection");
                 return new EguiImeBridge(base, self);
@@ -698,6 +714,25 @@ public class EguiNativeActivity extends NativeActivity {
                             (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
                     imm.restartInput(edit);
                     if (TRACE) Log.i("EguiIme", "setImePassword(" + password + ")");
+                });
+    }
+
+    /** Set the focused field's keyboard kind (IME_KIND_*); restarts input unless a password field is focused. */
+    public void setImeKind(int kind) {
+        runOnUiThread(
+                () -> {
+                    if (imeKind == kind) {
+                        return;
+                    }
+                    imeKind = kind;
+                    EditText edit = imeEdit;
+                    if (edit == null || imePassword) {
+                        return;
+                    }
+                    InputMethodManager imm =
+                            (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+                    imm.restartInput(edit);
+                    if (TRACE) Log.i("EguiIme", "setImeKind(" + kind + ")");
                 });
     }
 

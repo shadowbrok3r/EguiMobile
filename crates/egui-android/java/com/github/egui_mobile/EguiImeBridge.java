@@ -1,7 +1,9 @@
 package com.github.egui_mobile;
 
+import android.os.SystemClock;
 import android.text.Editable;
 import android.util.Log;
+import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.CompletionInfo;
@@ -306,9 +308,15 @@ public class EguiImeBridge extends InputConnectionWrapper {
 
     @Override
     public boolean performEditorAction(int editorAction) {
-        boolean ret = super.performEditorAction(editorAction);
-        trace("performEditorAction(" + editorAction + ")");
-        return ret;
+        // Every editor action reaches egui as an Enter press and release, via sendKeyEvent.
+        long down = SystemClock.uptimeMillis();
+        int flags = KeyEvent.FLAG_SOFT_KEYBOARD | KeyEvent.FLAG_KEEP_TOUCH_MODE | KeyEvent.FLAG_EDITOR_ACTION;
+        super.sendKeyEvent(new KeyEvent(down, down, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER, 0, 0,
+                KeyCharacterMap.VIRTUAL_KEYBOARD, 0, flags));
+        super.sendKeyEvent(new KeyEvent(SystemClock.uptimeMillis(), down, KeyEvent.ACTION_UP,
+                KeyEvent.KEYCODE_ENTER, 0, 0, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, flags));
+        trace("performEditorAction(" + editorAction + ") -> ENTER");
+        return true;
     }
 
     @Override

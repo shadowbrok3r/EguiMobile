@@ -172,6 +172,26 @@ pub fn set_ime_password(password: bool) -> bool {
     ok
 }
 
+/// Mirror the focused field's keyboard kind into the EditText's input type; a password field keeps its own.
+pub fn set_ime_kind(kind: egui_mobile_core::keyboard::KeyboardKind) -> bool {
+    let code = match kind {
+        egui_mobile_core::keyboard::KeyboardKind::Number => 1,
+        _ => 0,
+    };
+    let ok = crate::host::with_native_activity(|env, activity| {
+        if !is_egui_activity(env, activity)? {
+            return Ok(false);
+        }
+        env.call_method(activity, "setImeKind", "(I)V", &[JValue::Int(code)])?;
+        Ok(true)
+    })
+    .unwrap_or(false);
+    if ok && TRACE {
+        log::info!("egui-android ime: set_ime_kind({kind:?})");
+    }
+    ok
+}
+
 /// Keep the hidden EditText focused/visible without requesting another IME show animation.
 pub fn bind_ime() -> bool {
     crate::host::with_native_activity(|env, activity| {

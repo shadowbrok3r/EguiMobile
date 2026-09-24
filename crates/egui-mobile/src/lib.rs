@@ -13,7 +13,9 @@
 //! app!(MyApp::new); // → C ABI on iOS, android_main on Android
 //! ```
 
-pub use egui_mobile_core::{CreateContext, EguiApp, Haptic, Host, Insets, Permission, StylusProbe, egui, overflow};
+pub use egui_mobile_core::{
+    CreateContext, EguiApp, Haptic, Host, Insets, Permission, StylusProbe, egui, keyboard, overflow,
+};
 
 /// The entry-point macro. Emits the iOS C ABI when building for iOS and `android_main` when
 /// building for Android. `$crate` inside the re-exported macro still resolves to the backend

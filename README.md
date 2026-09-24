@@ -148,6 +148,9 @@ Android specifics handled by the runtime:
   `has_code = true`, `java_sources` → `egui-android/java`, and activity
   `com.github.egui_mobile.EguiNativeActivity` (plain `NativeActivity` falls back to the
   old show/hide path without spacebar cursor).
+- **Number keypad**: `egui_mobile::keyboard::number(&response)` after a `TextEdit` or
+  `DragValue` gives that field a signed decimal keypad while it has focus (a no-op off
+  Android). Every editor action key (Done, Go, Next) reaches egui as an Enter press and release.
 - **Clipboard + text actions**: egui has no Android selection menu, so while a text field
   is being edited the runtime overlays a floating **Paste / Copy / Cut / Select all** bar,
   bridges egui copies into the system clipboard via JNI, and injects clipboard text back

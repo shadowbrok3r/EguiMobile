@@ -5,7 +5,7 @@
 
 pub use android_activity::AndroidApp;
 pub use egui;
-pub use egui_mobile_core::{CreateContext, EguiApp, Haptic, Host, Insets, Permission, overflow};
+pub use egui_mobile_core::{CreateContext, EguiApp, Haptic, Host, Insets, Permission, keyboard, overflow};
 
 /// Adapts an [`EguiApp`] + [`Host`] to `eframe::App`. Each frame it opens a central panel, hands
 /// the root `ui` to the app, then drains queued host requests (JNI dispatch lives in `host`).
@@ -52,6 +52,8 @@ struct Adapter {
     ime_seed_restart: bool,
     /// Input type last pushed to the EditText, from egui's `IMEOutput::purpose`.
     ime_password: bool,
+    /// Keyboard kind last pushed to the EditText, from the app's `keyboard` marks.
+    ime_kind: egui_mobile_core::keyboard::KindLatch,
     /// Points subtracted from `screen_rect.max.y` this frame for the soft keyboard.
     ime_inset_pt: f32,
 }
@@ -244,6 +246,7 @@ impl eframe::App for Adapter {
         // which dismisses our EditText keyboard; its follow-up show on DecorView is ignored
         // ("view is not served").
         let guest_kb = crate::host::keyboard_requested();
+        let fresh_purpose = ui.ctx().output(|o| o.ime.map(|ime| ime.purpose));
         if let Some(ime) = ui.ctx().output(|o| o.ime) {
             self.last_ime = Some(egui::output::IMEOutput {
                 purpose: ime.purpose,
@@ -263,6 +266,15 @@ impl eframe::App for Adapter {
             }
         }
         let ime_wanted = ui.ctx().output(|o| o.ime.is_some());
+        // Keyboard kind from the app's marks on the focused field, pushed before the password flag.
+        let purpose = fresh_purpose.or(text_focus.then_some(egui::IMEPurpose::Normal));
+        let requested = egui_mobile_core::keyboard::requested(ui.ctx());
+        if let Some(kind) = self.ime_kind.update(purpose, requested) {
+            crate::ime_bridge::set_ime_kind(kind);
+            crate::ime_bridge::invalidate_last_sync();
+            self.ime_seed_restart = true;
+            self.ime_force_sync = true;
+        }
         // egui 0.36 reports the focused field's IME purpose; a password field must not reach the
         // keyboard's suggestion, autocorrect or personalized-learning stores.
         let password = ui
@@ -702,6 +714,7 @@ pub fn run_with_depth(
                 ime_force_sync: false,
                 ime_seed_restart: false,
                 ime_password: false,
+                ime_kind: egui_mobile_core::keyboard::KindLatch::default(),
                 ime_inset_pt: 0.0,
             }))
         }),
