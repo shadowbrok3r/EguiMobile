@@ -243,6 +243,22 @@ pub fn clear_carry() {
     }
 }
 
+/// The hidden EditText's text, or `None` while IME events wait to be drained or the call fails.
+fn mirror_text_if_settled() -> Option<String> {
+    crate::host::with_native_activity(|env, activity| {
+        if !is_egui_activity(env, activity)? {
+            return Ok(None);
+        }
+        let text = env.call_method(activity, "getImeTextIfSettled", "()Ljava/lang/String;", &[])?.l()?;
+        if text.is_null() {
+            return Ok(None);
+        }
+        let text: JString = text.into();
+        Ok(Some(env.get_string(&text)?.into()))
+    })
+    .flatten()
+}
+
 /// Drop the egui→EditText dedupe cache so the next sync pushes even if text matches.
 pub fn invalidate_last_sync() {
     if let Ok(mut g) = LAST_SYNC.lock() {
@@ -996,13 +1012,29 @@ pub fn resync_out_of_band(ctx: &egui::Context, focus: Option<egui::Id>) -> bool 
     let Some(text) = settled_text(ctx, focus) else {
         return false;
     };
-    let stale = match LAST_SYNC.lock() {
+    let synced = match LAST_SYNC.lock() {
         // Not seeded yet — sync_focused_text_edit owns the first push.
-        Ok(g) => g.as_ref().is_some_and(|(t, _, _)| *t != text),
-        Err(_) => false,
+        Ok(g) => g.as_ref().map(|(t, _, _)| t.clone()),
+        Err(_) => None,
     };
-    if !stale {
+    if synced.as_deref().is_none_or(|t| t == text) {
         return false;
+    }
+    // Adopt text the EditText already holds instead of pushing it.
+    match egui_mobile_core::ime::resync(&text, synced.as_deref(), mirror_text_if_settled().as_deref()) {
+        egui_mobile_core::ime::Resync::Keep => return false,
+        egui_mobile_core::ime::Resync::Adopt => {
+            if let Ok(mut g) = LAST_SYNC.lock()
+                && let Some((t, _, _)) = g.as_mut()
+            {
+                *t = text;
+            }
+            if TRACE {
+                log::info!("egui-android ime: mirror already holds egui's text, no resync");
+            }
+            return false;
+        }
+        egui_mobile_core::ime::Resync::Push => {}
     }
     let Some(state) = focus.and_then(|id| egui::text_edit::TextEditState::load(ctx, id)) else {
         return false;

@@ -8,6 +8,8 @@ mod app;
 #[doc(hidden)]
 pub mod chunked;
 mod host;
+#[doc(hidden)]
+pub mod ime;
 pub mod keyboard;
 pub mod overflow;
 

@@ -13,6 +13,7 @@ import android.os.Bundle;
 import android.os.SystemClock;
 import android.text.Editable;
 import android.text.InputType;
+import android.text.TextWatcher;
 import android.util.Log;
 import android.view.ActionMode;
 import android.view.KeyEvent;
@@ -52,6 +53,8 @@ public class EguiNativeActivity extends NativeActivity {
     static final int IME_KIND_NUMBER = 1;
     /** Keyboard kind the app marked the focused field with; read by onCreateInputConnection. */
     private volatile int imeKind = IME_KIND_TEXT;
+    /** The hidden EditText's text after its last change, readable from the render thread. */
+    private volatile String imeTextSnapshot = "";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -366,6 +369,19 @@ public class EguiNativeActivity extends NativeActivity {
                         return v.onApplyWindowInsets(insets);
                     });
         }
+        edit.addTextChangedListener(
+                new TextWatcher() {
+                    @Override
+                    public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+
+                    @Override
+                    public void onTextChanged(CharSequence s, int start, int before, int count) {}
+
+                    @Override
+                    public void afterTextChanged(Editable s) {
+                        imeTextSnapshot = s.toString();
+                    }
+                });
         imeEdit = edit;
     }
 
@@ -807,6 +823,11 @@ public class EguiNativeActivity extends NativeActivity {
                         // IME service, after which showSoftInput on the EditText is ignored.
                     }
                 });
+    }
+
+    /** The hidden EditText's text, or null while IC events wait for Rust to drain them. */
+    public String getImeTextIfSettled() {
+        return pending.isEmpty() ? imeTextSnapshot : null;
     }
 
     public String[] takePending() {
