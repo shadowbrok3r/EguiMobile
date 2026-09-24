@@ -67,8 +67,21 @@ public class EguiNativeActivity extends NativeActivity {
         } catch (Throwable t) {
             // nativeImeWake stays unresolved; Rust falls back to polling while the IME is up.
         }
+        applyDefaultTheme();
         super.onCreate(savedInstanceState);
         registerInstallReceiver();
+    }
+
+    /** Dark DeviceDefault theme for an activity whose manifest names no theme. */
+    private void applyDefaultTheme() {
+        try {
+            if (getPackageManager().getActivityInfo(getComponentName(), 0).getThemeResource() == 0) {
+                setTheme(android.R.style.Theme_DeviceDefault_NoActionBar);
+                Log.i("EguiTheme", "manifest names no theme; using Theme.DeviceDefault.NoActionBar");
+            }
+        } catch (Throwable t) {
+            Log.w("EguiTheme", "default theme not applied: " + t);
+        }
     }
 
     /** The activity is leaving the foreground. Rust turns this into `EguiApp::on_pause`, which is

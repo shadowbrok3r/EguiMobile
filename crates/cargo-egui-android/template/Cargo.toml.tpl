@@ -27,11 +27,13 @@ target_sdk_version = 35
 [package.metadata.android.application]
 label = "{{display_name}}"
 has_code = true
+# Dark system window: the launch splash and any Android-drawn UI (the runtime also applies it when unset).
+theme = "@android:style/Theme.DeviceDefault.NoActionBar"
 
 # EguiNativeActivity hosts a hidden EditText for real IME InputConnection (spacebar cursor).
 [[package.metadata.android.application.activity]]
 name = "com.github.egui_mobile.EguiNativeActivity"
-config_changes = "orientation|keyboardHidden|screenSize|screenLayout|density"
+config_changes = "orientation|keyboardHidden|screenSize|screenLayout|density|uiMode"
 window_soft_input_mode = "adjustResize"
 [[package.metadata.android.application.activity.meta_data]]
 name = "android.app.lib_name"

@@ -159,6 +159,11 @@ Android specifics handled by the runtime:
   is being edited the runtime overlays a floating **Paste / Copy / Cut / Select all** bar,
   bridges egui copies into the system clipboard via JNI, and injects clipboard text back
   as paste events. This works for host-side text fields and WASM-plugin text fields alike.
+- **Dark system window**: `EguiNativeActivity` applies `Theme.DeviceDefault.NoActionBar` when the
+  manifest names no theme. The launch splash is drawn from the manifest before any app code
+  runs, so for a dark splash set `theme = "@android:style/Theme.DeviceDefault.NoActionBar"` under
+  `[package.metadata.android.application]` (new apps get it). Keyboards, the share sheet and the
+  permission, picker and install dialogs are drawn by the system and follow the phone's theme.
 - **Insets**: status bar / cutout / nav bar are fed into `safe_area_insets()` each frame
   and the root UI is inset automatically (Android 15 edge-to-edge).
 
