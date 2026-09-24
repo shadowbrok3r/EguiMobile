@@ -544,27 +544,59 @@ fn media_target(mime: &str) -> (&'static str, String) {
     }
 }
 
-/// Insert `path`'s bytes into MediaStore — the gallery for media, Downloads for everything else —
-/// and return the `content://` URI. Scoped-storage insert (API 29+), so no runtime storage
-/// permission is needed.
+/// Bytes copied per chunk from a file into MediaStore, through one reused Java array.
+const COPY_CHUNK: usize = 1 << 20;
+
+/// Outcome of the last share, taken by `HostExt::take_share_outcome`.
+static SHARE_OUTCOME: Mutex<Option<Result<String, String>>> = Mutex::new(None);
+
+/// Copy `path` into MediaStore — the gallery for media, Downloads for everything else — and
+/// return the `content://` URI, or why it failed; a failure leaves no row and no pending exception.
+/// Scoped-storage insert (API 29+), so no runtime storage permission is needed.
 fn insert_into_media_store<'l>(
     env: &mut jni::JNIEnv<'l>,
     activity: &JObject,
     path: &str,
     name: &str,
     mime: &str,
-) -> jni::errors::Result<JObject<'l>> {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) => {
-            log::error!("insert_into_media_store: reading {path} failed: {e}");
-            return Ok(JObject::null());
+) -> Result<JObject<'l>, String> {
+    let started = std::time::Instant::now();
+    let mut file = std::fs::File::open(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    let resolver =
+        content_resolver(env, activity).map_err(|e| java_failure(env, "getContentResolver", e))?;
+    let uri = insert_pending_row(env, &resolver, name, mime)
+        .map_err(|e| java_failure(env, "MediaStore insert", e))?;
+    if uri.is_null() {
+        return Err(format!("MediaStore refused to insert {name}"));
+    }
+    match fill_pending_row(env, &resolver, &uri, &mut file) {
+        Ok(bytes) => {
+            let ms = started.elapsed().as_millis();
+            log::info!("insert_into_media_store: {name}, {bytes} bytes in {ms} ms");
+            Ok(uri)
         }
-    };
-    let resolver = env
-        .call_method(activity, "getContentResolver", "()Landroid/content/ContentResolver;", &[])?
-        .l()?;
+        Err(reason) => {
+            delete_row(env, &resolver, &uri);
+            Err(reason)
+        }
+    }
+}
 
+fn content_resolver<'l>(
+    env: &mut jni::JNIEnv<'l>,
+    activity: &JObject,
+) -> jni::errors::Result<JObject<'l>> {
+    env.call_method(activity, "getContentResolver", "()Landroid/content/ContentResolver;", &[])?
+        .l()
+}
+
+/// Insert an `is_pending` row for `name` into the collection and folder [`media_target`] picks.
+fn insert_pending_row<'l>(
+    env: &mut jni::JNIEnv<'l>,
+    resolver: &JObject,
+    name: &str,
+    mime: &str,
+) -> jni::errors::Result<JObject<'l>> {
     let (collection_class, relative_path) = media_target(mime);
 
     let values = env.new_object("android/content/ContentValues", "()V", &[])?;
@@ -593,32 +625,78 @@ fn insert_into_media_store<'l>(
     let collection = env
         .get_static_field(collection_class, "EXTERNAL_CONTENT_URI", "Landroid/net/Uri;")?
         .l()?;
-    let uri = env
-        .call_method(
-            &resolver,
-            "insert",
-            "(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;",
-            &[(&collection).into(), (&values).into()],
-        )?
-        .l()?;
-    if uri.is_null() {
-        log::error!("insert_into_media_store: MediaStore insert returned null");
-        return Ok(uri);
-    }
+    env.call_method(
+        resolver,
+        "insert",
+        "(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;",
+        &[(&collection).into(), (&values).into()],
+    )?
+    .l()
+}
 
+/// Stream `file` into the pending row at `uri`, then publish the row; returns the bytes written.
+fn fill_pending_row(
+    env: &mut jni::JNIEnv,
+    resolver: &JObject,
+    uri: &JObject,
+    file: &mut std::fs::File,
+) -> Result<u64, String> {
     let stream = env
         .call_method(
-            &resolver,
+            resolver,
             "openOutputStream",
             "(Landroid/net/Uri;)Ljava/io/OutputStream;",
-            &[(&uri).into()],
-        )?
-        .l()?;
-    let array = env.byte_array_from_slice(&bytes)?;
-    env.call_method(&stream, "write", "([B)V", &[(&array).into()])?;
-    env.call_method(&stream, "close", "()V", &[])?;
+            &[uri.into()],
+        )
+        .and_then(|v| v.l())
+        .map_err(|e| java_failure(env, "openOutputStream", e))?;
+    if stream.is_null() {
+        return Err("MediaStore gave no output stream".to_string());
+    }
+    let copied = copy_to_stream(env, &stream, file);
+    let closed = env
+        .call_method(&stream, "close", "()V", &[])
+        .map_err(|e| java_failure(env, "closing the MediaStore stream", e));
+    let bytes = copied?;
+    closed?;
+    publish_row(env, resolver, uri).map_err(|e| java_failure(env, "clearing is_pending", e))?;
+    Ok(bytes)
+}
 
-    // Clear is_pending so the image becomes visible in the gallery.
+/// Copy `file` into `stream` one [`COPY_CHUNK`] at a time through a single Java byte array.
+fn copy_to_stream(
+    env: &mut jni::JNIEnv,
+    stream: &JObject,
+    file: &mut std::fs::File,
+) -> Result<u64, String> {
+    let chunk = env
+        .new_byte_array(COPY_CHUNK as i32)
+        .map_err(|e| java_failure(env, "allocating the copy buffer", e))?;
+    let mut buf = vec![0u8; COPY_CHUNK];
+    let copied = egui_mobile_core::chunked::copy(file, &mut buf, |bytes| -> jni::errors::Result<()> {
+        // SAFETY: u8 and i8 have the same size and alignment.
+        let signed = unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<i8>(), bytes.len()) };
+        env.set_byte_array_region(&chunk, 0, signed)?;
+        env.call_method(
+            stream,
+            "write",
+            "([BII)V",
+            &[(&chunk).into(), JValue::Int(0), JValue::Int(bytes.len() as i32)],
+        )?;
+        Ok(())
+    });
+    copied.map_err(|e| match e {
+        egui_mobile_core::chunked::CopyError::Read { copied, error } => {
+            format!("reading the file failed after {copied} bytes: {error}")
+        }
+        egui_mobile_core::chunked::CopyError::Write { copied, error } => {
+            java_failure(env, &format!("writing to MediaStore after {copied} bytes"), error)
+        }
+    })
+}
+
+/// Clear `is_pending` on the row at `uri` so the file becomes visible.
+fn publish_row(env: &mut jni::JNIEnv, resolver: &JObject, uri: &JObject) -> jni::errors::Result<()> {
     let finalize = env.new_object("android/content/ContentValues", "()V", &[])?;
     let pk = env.new_string("is_pending")?;
     let zero = env.new_object("java/lang/Integer", "(I)V", &[JValue::Int(0)])?;
@@ -629,13 +707,57 @@ fn insert_into_media_store<'l>(
         &[(&pk).into(), (&zero).into()],
     )?;
     let null_obj = JObject::null();
-    env.call_method(
-        &resolver,
-        "update",
-        "(Landroid/net/Uri;Landroid/content/ContentValues;Ljava/lang/String;[Ljava/lang/String;)I",
-        &[(&uri).into(), (&finalize).into(), (&null_obj).into(), (&null_obj).into()],
-    )?;
-    Ok(uri)
+    let rows = env
+        .call_method(
+            resolver,
+            "update",
+            "(Landroid/net/Uri;Landroid/content/ContentValues;Ljava/lang/String;[Ljava/lang/String;)I",
+            &[uri.into(), (&finalize).into(), (&null_obj).into(), (&null_obj).into()],
+        )?
+        .i()?;
+    if rows < 1 {
+        log::warn!("insert_into_media_store: clearing is_pending updated {rows} rows");
+    }
+    Ok(())
+}
+
+/// Delete the MediaStore row at `uri`; a failure is logged and its exception cleared.
+fn delete_row(env: &mut jni::JNIEnv, resolver: &JObject, uri: &JObject) {
+    let null_obj = JObject::null();
+    let deleted = env
+        .call_method(
+            resolver,
+            "delete",
+            "(Landroid/net/Uri;Ljava/lang/String;[Ljava/lang/String;)I",
+            &[uri.into(), (&null_obj).into(), (&null_obj).into()],
+        )
+        .and_then(|v| v.i());
+    match deleted {
+        Ok(rows) => log::info!("insert_into_media_store: deleted {rows} unfinished row(s)"),
+        Err(e) => log::error!("{}", java_failure(env, "deleting the unfinished MediaStore row", e)),
+    }
+}
+
+/// `what` failed: the pending Java exception's text, cleared here, or else the JNI error.
+fn java_failure(env: &mut jni::JNIEnv, what: &str, err: jni::errors::Error) -> String {
+    let detail = take_java_exception(env).unwrap_or_else(|| err.to_string());
+    format!("{what} failed: {detail}")
+}
+
+/// The pending Java exception's `toString()`, logged with its stack and cleared; `None` when none is pending.
+fn take_java_exception(env: &mut jni::JNIEnv) -> Option<String> {
+    if !env.exception_check().unwrap_or(false) {
+        return None;
+    }
+    let thrown = env.exception_occurred();
+    let _ = env.exception_describe();
+    let _ = env.exception_clear();
+    let text = thrown
+        .and_then(|t| env.call_method(&t, "toString", "()Ljava/lang/String;", &[]))
+        .and_then(|v| v.l())
+        .and_then(|s| env.get_string(&JString::from(s)).map(String::from));
+    let _ = env.exception_clear();
+    Some(text.unwrap_or_else(|_| "an unreadable Java exception".to_string()))
 }
 
 /// Copy `path`'s bytes into the shared gallery via MediaStore, and report the folder it landed in
@@ -646,16 +768,18 @@ fn insert_into_media_store<'l>(
 /// ContentResolver insert has no UI-thread requirement (the device-media reads below do the same).
 fn save_to_gallery(path: &str, name: &str, mime: &str) -> Option<String> {
     let folder = media_target(mime).1;
-    let ok = with_activity(|env, activity| {
-        let uri = insert_into_media_store(env, activity, path, name, mime)?;
-        Ok(!uri.is_null())
+    let saved = with_activity(|env, activity| {
+        Ok(insert_into_media_store(env, activity, path, name, mime).map(drop))
     });
-    match ok {
-        Some(true) => {
+    match saved {
+        Some(Ok(())) => {
             log::info!("save_to_gallery: {name} -> {folder}");
             Some(folder)
         }
-        Some(false) => None,
+        Some(Err(reason)) => {
+            log::error!("save_to_gallery: {name}: {reason}");
+            None
+        }
         None => {
             log::error!("save_to_gallery: JNI call failed for {name}");
             None
@@ -686,67 +810,98 @@ fn jni_install_message() -> Option<String> {
 }
 
 /// Insert `path` into MediaStore, then present the system share sheet for the resulting URI.
-/// Best-effort; failures are logged and swallowed.
+/// The outcome is latched for `HostExt::take_share_outcome`; a failure leaves no MediaStore row.
 fn share_media(path: &str, name: &str, mime: &str) {
-    let done = with_activity(|env, activity| {
-        let uri = insert_into_media_store(env, activity, path, name, mime)?;
-        if uri.is_null() {
-            return Ok(());
+    let folder = media_target(mime).1;
+    let outcome = with_activity(|env, activity| {
+        let uri = match insert_into_media_store(env, activity, path, name, mime) {
+            Ok(uri) => uri,
+            Err(reason) => return Ok(Err(reason)),
+        };
+        let Err(e) = start_share_sheet(env, activity, &uri, name, mime) else {
+            return Ok(Ok(()));
+        };
+        let reason = java_failure(env, "opening the share sheet", e);
+        match content_resolver(env, activity) {
+            Ok(resolver) => delete_row(env, &resolver, &uri),
+            Err(e) => log::error!("{}", java_failure(env, "getContentResolver", e)),
         }
-        let action = env.new_string("android.intent.action.SEND")?;
-        let intent = env.new_object(
-            "android/content/Intent",
-            "(Ljava/lang/String;)V",
-            &[(&action).into()],
-        )?;
-        let jmime = env.new_string(mime)?;
-        env.call_method(
-            &intent,
-            "setType",
-            "(Ljava/lang/String;)Landroid/content/Intent;",
-            &[(&jmime).into()],
-        )?;
-        let key = env.new_string("android.intent.extra.STREAM")?;
-        env.call_method(
-            &intent,
-            "putExtra",
-            "(Ljava/lang/String;Landroid/os/Parcelable;)Landroid/content/Intent;",
-            &[(&key).into(), (&uri).into()],
-        )?;
-        // Grant the receiving app read access to the content URI, and launch outside the task.
-        env.call_method(
-            &intent,
-            "addFlags",
-            "(I)Landroid/content/Intent;",
-            &[JValue::Int(0x1000_0001)],
-        )?;
-        let null = JObject::null();
-        let chooser = env
-            .call_static_method(
-                "android/content/Intent",
-                "createChooser",
-                "(Landroid/content/Intent;Ljava/lang/CharSequence;)Landroid/content/Intent;",
-                &[(&intent).into(), (&null).into()],
-            )?
-            .l()?;
-        env.call_method(
-            &chooser,
-            "addFlags",
-            "(I)Landroid/content/Intent;",
-            &[JValue::Int(0x1000_0000)],
-        )?;
-        env.call_method(
-            activity,
-            "startActivity",
-            "(Landroid/content/Intent;)V",
-            &[(&chooser).into()],
-        )?;
-        log::info!("share_media: {name} ({mime})");
-        Ok(())
-    });
-    if done.is_none() {
-        log::error!("share_media: JNI call failed for {name}");
+        Ok(Err(reason))
+    })
+    .unwrap_or_else(|| Err("no Java environment to share from".to_string()))
+    .map(|()| folder);
+    match &outcome {
+        Ok(folder) => log::info!("share_media: {name} ({mime}) -> {folder}"),
+        Err(reason) => log::error!("share_media: {name}: {reason}"),
     }
+    if let Ok(mut latch) = SHARE_OUTCOME.lock() {
+        *latch = Some(outcome);
+    }
+}
+
+/// Start the system share sheet for `uri`, titled and previewed with the display name `name`.
+fn start_share_sheet(
+    env: &mut jni::JNIEnv,
+    activity: &JObject,
+    uri: &JObject,
+    name: &str,
+    mime: &str,
+) -> jni::errors::Result<()> {
+    let action = env.new_string("android.intent.action.SEND")?;
+    let intent =
+        env.new_object("android/content/Intent", "(Ljava/lang/String;)V", &[(&action).into()])?;
+    let jmime = env.new_string(mime)?;
+    env.call_method(
+        &intent,
+        "setType",
+        "(Ljava/lang/String;)Landroid/content/Intent;",
+        &[(&jmime).into()],
+    )?;
+    let key = env.new_string("android.intent.extra.STREAM")?;
+    env.call_method(
+        &intent,
+        "putExtra",
+        "(Ljava/lang/String;Landroid/os/Parcelable;)Landroid/content/Intent;",
+        &[(&key).into(), uri.into()],
+    )?;
+    // ClipData labelled with the display name, whose read grant createChooser passes to the sheet.
+    let jname = env.new_string(name)?;
+    let item = env.new_object("android/content/ClipData$Item", "(Landroid/net/Uri;)V", &[uri.into()])?;
+    let mimes = env.new_object_array(1, "java/lang/String", &jmime)?;
+    let clip = env.new_object(
+        "android/content/ClipData",
+        "(Ljava/lang/CharSequence;[Ljava/lang/String;Landroid/content/ClipData$Item;)V",
+        &[(&jname).into(), (&mimes).into(), (&item).into()],
+    )?;
+    env.call_method(&intent, "setClipData", "(Landroid/content/ClipData;)V", &[(&clip).into()])?;
+    // Grant the receiving app read access to the content URI, and launch outside the task.
+    env.call_method(
+        &intent,
+        "addFlags",
+        "(I)Landroid/content/Intent;",
+        &[JValue::Int(0x1000_0001)],
+    )?;
+    let chooser = env
+        .call_static_method(
+            "android/content/Intent",
+            "createChooser",
+            "(Landroid/content/Intent;Ljava/lang/CharSequence;)Landroid/content/Intent;",
+            &[(&intent).into(), (&jname).into()],
+        )?
+        .l()?;
+    env.call_method(
+        &chooser,
+        "addFlags",
+        "(I)Landroid/content/Intent;",
+        &[JValue::Int(0x1000_0000)],
+    )?;
+    env.call_method(
+        activity,
+        "startActivity",
+        "(Landroid/content/Intent;)V",
+        &[(&chooser).into()],
+    )?;
+    Ok(())
 }
 
 /// Hand `path` to MediaProvider for a rescan. A directory holding `.nomedia` drops the Photos
@@ -2081,7 +2236,12 @@ pub trait HostExt {
     ) -> Option<String>;
     /// Insert an image/video file into MediaStore, then present the system share sheet for it.
     /// `mime` is e.g. `"image/png"` or `"video/mp4"`.
+    /// The outcome arrives through [`take_share_outcome`](HostExt::take_share_outcome).
     fn share_media(&self, path: impl Into<String>, display_name: impl Into<String>, mime: impl Into<String>);
+    /// Take the last share's outcome: `Ok(folder)` once the sheet opened, `Err(reason)` if it failed and left nothing.
+    fn take_share_outcome(&self) -> Option<Result<String, String>> {
+        None
+    }
     /// Rescan a file or directory into MediaStore. A directory holding `.nomedia` loses the Photos
     /// entries an earlier scan gave it, so this is how an app un-publishes its own image folder.
     fn media_scan(&self, path: impl Into<String>);
@@ -2217,6 +2377,9 @@ impl HostExt for Host {
         // Same tab-packed meta as save_to_gallery: path in str_a, "name\tmime" in str_b.
         let meta = format!("{}\t{}", display_name.into(), mime.into());
         self.drv_enqueue(K_SHARE_MEDIA, Some(path.into()), Some(meta), 0);
+    }
+    fn take_share_outcome(&self) -> Option<Result<String, String>> {
+        SHARE_OUTCOME.lock().ok()?.take()
     }
     fn media_scan(&self, path: impl Into<String>) {
         self.drv_enqueue(K_MEDIA_SCAN, Some(path.into()), None, 0);

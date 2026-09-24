@@ -151,6 +151,10 @@ Android specifics handled by the runtime:
 - **Number keypad**: `egui_mobile::keyboard::number(&response)` after a `TextEdit` or
   `DragValue` gives that field a signed decimal keypad while it has focus (a no-op off
   Android). Every editor action key (Done, Go, Next) reaches egui as an Enter press and release.
+- **Sharing files**: `HostExt::share_media` streams the file into MediaStore through one
+  1 MiB Java array, so its size is bounded by storage rather than the Java heap.
+  `HostExt::take_share_outcome()` then reports `Ok(folder)` once the share sheet opened, or
+  `Err(reason)` with nothing left behind in MediaStore.
 - **Clipboard + text actions**: egui has no Android selection menu, so while a text field
   is being edited the runtime overlays a floating **Paste / Copy / Cut / Select all** bar,
   bridges egui copies into the system clipboard via JNI, and injects clipboard text back

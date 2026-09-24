@@ -5,6 +5,8 @@
 pub use egui;
 
 mod app;
+#[doc(hidden)]
+pub mod chunked;
 mod host;
 pub mod keyboard;
 pub mod overflow;
