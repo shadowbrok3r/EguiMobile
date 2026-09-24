@@ -830,6 +830,13 @@ public class EguiNativeActivity extends NativeActivity {
         return pending.isEmpty() ? imeTextSnapshot : null;
     }
 
+    /** Drop every undrained IC event now; safe from any thread. */
+    public void discardPending() {
+        int dropped = pending.size();
+        pending.clear();
+        if (TRACE && dropped > 0) Log.i("EguiIme", "discardPending dropped " + dropped);
+    }
+
     public String[] takePending() {
         ArrayList<String> out = new ArrayList<>();
         while (true) {

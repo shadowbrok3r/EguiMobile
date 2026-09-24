@@ -54,6 +54,10 @@ struct Adapter {
     ime_password: bool,
     /// Keyboard kind last pushed to the EditText, from the app's `keyboard` marks.
     ime_kind: egui_mobile_core::keyboard::KindLatch,
+    /// Times a keyboard that is up while no field wants it.
+    ime_stray: egui_mobile_core::ime::StrayKeyboard,
+    /// Times a keyboard show request that has not produced a keyboard yet.
+    ime_show_watch: egui_mobile_core::ime::ShowWatch,
     /// Points subtracted from `screen_rect.max.y` this frame for the soft keyboard.
     ime_inset_pt: f32,
 }
@@ -214,6 +218,7 @@ impl eframe::App for Adapter {
             // Events deferred against field A's document must not replay into field B, and
             // the seed for B restarts the IME session so the keyboard re-reads the document.
             crate::ime_bridge::clear_carry();
+            crate::ime_bridge::discard_pending();
             self.ime_seed_restart = true;
         }
         // A field gaining focus may carry a stuck composition from an earlier tap/dismissal —
@@ -291,19 +296,31 @@ impl eframe::App for Adapter {
         }
         // Do not key want_ime off ime_bridge_hot alone — that can never go false and traps the keyboard.
         let want_ime = hold || ime_wanted || text_focus || guest_kb;
+        let now = ui.ctx().input(|i| i.time);
         if want_ime {
             self.ime_hide_arm = 0;
             let kb = self.host.keyboard_height();
             if !self.ime_bridge_hot {
+                // Discard input queued before this session.
+                crate::ime_bridge::discard_pending();
                 let _ = crate::ime_bridge::set_soft_keyboard(true);
                 self.ime_bridge_hot = true;
                 self.ime_seen_open = false;
                 self.ime_recover_arm = 0;
                 self.ime_recover_cooldown = 0;
+                self.ime_show_watch.requested(now);
                 // Seed EditText once when the keyboard opens; never every frame while typing.
                 self.ime_force_sync = true;
+                self.ime_seed_restart = true;
             } else {
                 let _ = crate::ime_bridge::bind_ime();
+                if self.ime_show_watch.update(now, kb >= Self::IME_OPEN_PT) {
+                    log::info!("egui-android ime: requested keyboard never appeared, showing again");
+                    let _ = crate::ime_bridge::show_ime_force();
+                }
+                if self.ime_show_watch.armed() {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                }
                 if kb >= Self::IME_OPEN_PT {
                     self.ime_seen_open = true;
                     self.ime_recover_arm = 0;
@@ -331,6 +348,7 @@ impl eframe::App for Adapter {
                 }
             }
         } else {
+            self.ime_show_watch.clear();
             self.ime_recover_arm = 0;
             self.ime_recover_cooldown = 0;
             self.ime_hide_arm = self.ime_hide_arm.saturating_add(1);
@@ -346,6 +364,16 @@ impl eframe::App for Adapter {
                 self.ime_force_sync = false;
                 self.ime_seed_restart = false;
             }
+        }
+        // Hide a keyboard that is up while no field wants it.
+        let keyboard_up = self.host.keyboard_height() >= Self::IME_OPEN_PT;
+        if self.ime_stray.update(now, want_ime || self.ime_bridge_hot, keyboard_up) {
+            log::info!("egui-android ime: keyboard up with no field focused, hiding it");
+            let _ = crate::ime_bridge::set_soft_keyboard(false);
+            crate::ime_bridge::discard_pending();
+        }
+        if self.ime_stray.armed() {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
         }
         // egui → EditText only when opening the keyboard, switching fields, or bar paste/cut —
         // never while typing (setText resets the caret and triggers invalidateInput).
@@ -463,6 +491,7 @@ impl Adapter {
         self.ime_seen_open = false;
         self.ime_recover_arm = 0;
         self.ime_recover_cooldown = 0;
+        self.ime_show_watch.clear();
         self.ime_hide_arm = 0;
         self.ime_hold_frames = 0;
         self.bar_touch = false;
@@ -715,6 +744,8 @@ pub fn run_with_depth(
                 ime_seed_restart: false,
                 ime_password: false,
                 ime_kind: egui_mobile_core::keyboard::KindLatch::default(),
+                ime_stray: egui_mobile_core::ime::StrayKeyboard::default(),
+                ime_show_watch: egui_mobile_core::ime::ShowWatch::default(),
                 ime_inset_pt: 0.0,
             }))
         }),

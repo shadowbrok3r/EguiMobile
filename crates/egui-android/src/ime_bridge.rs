@@ -243,6 +243,19 @@ pub fn clear_carry() {
     }
 }
 
+/// Drop every IME event not yet applied, in Java's queue and carried here.
+pub fn discard_pending() {
+    clear_carry();
+    clear_preedit_tracking();
+    let _ = crate::host::with_native_activity(|env, activity| {
+        if !is_egui_activity(env, activity)? {
+            return Ok(());
+        }
+        env.call_method(activity, "discardPending", "()V", &[])?;
+        Ok(())
+    });
+}
+
 /// The hidden EditText's text, or `None` while IME events wait to be drained or the call fails.
 fn mirror_text_if_settled() -> Option<String> {
     crate::host::with_native_activity(|env, activity| {
