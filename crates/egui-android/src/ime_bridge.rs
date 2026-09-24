@@ -243,10 +243,20 @@ pub fn clear_carry() {
     }
 }
 
+/// A composing region inside egui's selection that was not applied to egui: start, end and word.
+static SELECTION_WORD: Mutex<Option<(usize, usize, String)>> = Mutex::new(None);
+
+fn clear_selection_word() {
+    if let Ok(mut g) = SELECTION_WORD.lock() {
+        *g = None;
+    }
+}
+
 /// Drop every IME event not yet applied, in Java's queue and carried here.
 pub fn discard_pending() {
     clear_carry();
     clear_preedit_tracking();
+    clear_selection_word();
     let _ = crate::host::with_native_activity(|env, activity| {
         if !is_egui_activity(env, activity)? {
             return Ok(());
@@ -732,6 +742,9 @@ pub fn apply_pending(
             deferred.push(ev);
             continue;
         }
+        if !matches!(ev, ImeEvent::Preedit(_) | ImeEvent::Region { .. } | ImeEvent::Selection { .. }) {
+            clear_selection_word();
+        }
         match ev {
             ImeEvent::Selection { start, end, strong } => {
                 if !strong {
@@ -783,6 +796,32 @@ pub fn apply_pending(
                 pending_events.push(egui::Event::Ime(egui::ImeEvent::Commit(text)));
             }
             ImeEvent::Preedit(text) => {
+                let word = SELECTION_WORD.lock().ok().and_then(|g| g.clone());
+                if let Some((start, end, word)) = word {
+                    if had_mutate {
+                        deferred.push(ImeEvent::Preedit(text));
+                        continue;
+                    }
+                    clear_selection_word();
+                    // An update to a word the IME re-composed inside egui's selection edits that selection.
+                    match egui_mobile_core::ime::composition_over_selection(&word, &text) {
+                        egui_mobile_core::ime::OverSelection::Delete => {
+                            had_mutate = true;
+                            pending_events.push(key(egui::Key::Backspace));
+                            reseed_after_selection_delete();
+                            continue;
+                        }
+                        egui_mobile_core::ime::OverSelection::Replace(typed) => {
+                            had_mutate = true;
+                            pending_events.push(egui::Event::Ime(egui::ImeEvent::Commit(typed)));
+                            reseed_after_selection_delete();
+                            continue;
+                        }
+                        egui_mobile_core::ime::OverSelection::Compose => {
+                            set_state_selection(ctx, focus, start, end);
+                        }
+                    }
+                }
                 had_mutate = true;
                 if let Ok(mut g) = LAST_PREEDIT.lock() {
                     g.clone_from(&text);
@@ -868,6 +907,17 @@ pub fn apply_pending(
                     deferred.push(ImeEvent::Region { start, end, text });
                     continue;
                 }
+                // A word re-composed inside egui's selection leaves the selection as it is.
+                if egui_mobile_core::ime::region_in_selection(live_selection(ctx, focus), (start, end)) {
+                    if TRACE {
+                        log::info!("egui-android ime: Region {start}..{end} inside the selection, kept off egui");
+                    }
+                    if let Ok(mut g) = SELECTION_WORD.lock() {
+                        *g = Some((start, end, text));
+                    }
+                    continue;
+                }
+                clear_selection_word();
                 // Offsets from a drifted mirror would compose into unrelated text: when the
                 // settled buffer is readable and [start, end) does not hold the region text,
                 // drop the event and realign the mirror (restart ends the IME's composition).

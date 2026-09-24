@@ -28,6 +28,33 @@ pub fn composition_caret(len: usize, caret: Option<usize>) -> usize {
     caret.map_or(len, |c| c.min(len))
 }
 
+/// Whether an IME composing region lies inside a non-collapsed selection egui holds.
+pub fn region_in_selection(selection: Option<(usize, usize)>, region: (usize, usize)) -> bool {
+    selection.is_some_and(|(s, e)| s < e && s <= region.0 && region.1 <= e && region.0 < region.1)
+}
+
+/// How a composition update over a selected word maps onto that selection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OverSelection {
+    /// The update removed characters: delete the selection.
+    Delete,
+    /// The update appended characters: replace the selection with them.
+    Replace(String),
+    /// Anything else: treat the update as an ordinary composition.
+    Compose,
+}
+
+/// Map a composition update `update` to the selection whose word `word` the IME re-composed.
+pub fn composition_over_selection(word: &str, update: &str) -> OverSelection {
+    if update.chars().count() < word.chars().count() && (word.starts_with(update) || word.ends_with(update)) {
+        OverSelection::Delete
+    } else if update.len() > word.len() && update.starts_with(word) {
+        OverSelection::Replace(update[word.len()..].to_owned())
+    } else {
+        OverSelection::Compose
+    }
+}
+
 /// Where an IME selection lands relative to the composition egui shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CaretPlacement {
@@ -183,6 +210,35 @@ mod tests {
         assert_eq!(composition_caret(5, Some(2)), 2);
         assert_eq!(composition_caret(5, Some(9)), 5);
         assert_eq!(composition_caret(0, Some(3)), 0);
+    }
+
+    #[test]
+    fn a_region_counts_only_inside_a_real_selection() {
+        assert!(region_in_selection(Some((4, 7)), (4, 7)));
+        assert!(region_in_selection(Some((0, 13)), (8, 13)));
+        assert!(!region_in_selection(Some((7, 7)), (4, 7)));
+        assert!(!region_in_selection(Some((4, 7)), (4, 9)));
+        assert!(!region_in_selection(None, (4, 7)));
+        assert!(!region_in_selection(Some((4, 7)), (5, 5)));
+    }
+
+    #[test]
+    fn a_shortened_word_deletes_the_selection() {
+        assert_eq!(composition_over_selection("two", "tw"), OverSelection::Delete);
+        assert_eq!(composition_over_selection("two", "wo"), OverSelection::Delete);
+        assert_eq!(composition_over_selection("two", ""), OverSelection::Delete);
+    }
+
+    #[test]
+    fn a_lengthened_word_replaces_the_selection_with_the_new_letters() {
+        assert_eq!(composition_over_selection("two", "twox"), OverSelection::Replace("x".into()));
+        assert_eq!(composition_over_selection("naïve", "naïves"), OverSelection::Replace("s".into()));
+    }
+
+    #[test]
+    fn an_unrelated_update_composes_as_usual() {
+        assert_eq!(composition_over_selection("two", "ten"), OverSelection::Compose);
+        assert_eq!(composition_over_selection("two", "two"), OverSelection::Compose);
     }
 
     #[test]
