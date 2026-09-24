@@ -23,6 +23,64 @@ pub fn resync(settled: &str, synced: Option<&str>, mirror: Option<&str>) -> Resy
     }
 }
 
+/// Caret inside a composition `len` chars long, counted from its start: `caret` when it lies within, else the end.
+pub fn composition_caret(len: usize, caret: Option<usize>) -> usize {
+    caret.map_or(len, |c| c.min(len))
+}
+
+/// Where an IME selection lands relative to the composition egui shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CaretPlacement {
+    /// No composition is tracked: move egui's cursor.
+    Plain,
+    /// Inside the composition: keep it, with this range relative to its start.
+    Inside(std::ops::Range<usize>),
+    /// Outside it: finish the composition where it is, then move.
+    Outside,
+    /// egui no longer holds the composition where it was put: stop tracking it.
+    Lost,
+}
+
+/// Placement of the IME's `selection`, given the tracked preedit's length and egui's live selection.
+pub fn caret_placement(preedit_len: usize, live: Option<(usize, usize)>, selection: (usize, usize)) -> CaretPlacement {
+    if preedit_len == 0 {
+        return CaretPlacement::Plain;
+    }
+    match live {
+        Some((a, b)) if b >= a && b - a == preedit_len => {
+            if a <= selection.0 && selection.0 <= selection.1 && selection.1 <= b {
+                CaretPlacement::Inside(selection.0 - a..selection.1 - a)
+            } else {
+                CaretPlacement::Outside
+            }
+        }
+        _ => CaretPlacement::Lost,
+    }
+}
+
+/// What a `finishComposingText` does to egui.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Finish {
+    /// Commit the tracked preedit over the composition egui shows.
+    Commit,
+    /// End egui's composition at a collapsed caret, changing no text.
+    End,
+    /// Leave egui's text and selection alone.
+    Drop,
+}
+
+/// The finish for a tracked preedit `preedit_len` chars long, given egui's live selection and whether
+/// an earlier event in the same batch already changed egui (its live selection is then out of date).
+pub fn finish(preedit_len: usize, live: Option<(usize, usize)>, batch_mutated: bool) -> Finish {
+    match live {
+        _ if preedit_len == 0 => Finish::Drop,
+        _ if batch_mutated => Finish::Commit,
+        Some((a, b)) if b >= a && b - a == preedit_len => Finish::Commit,
+        Some((a, b)) if a == b => Finish::End,
+        _ => Finish::Drop,
+    }
+}
+
 /// Seconds a keyboard may stay up while no field wants it before the bridge hides it.
 pub const STRAY_KEYBOARD_SECS: f64 = 0.4;
 
@@ -117,6 +175,55 @@ mod tests {
     fn nothing_is_pushed_before_the_seed_or_while_events_are_in_flight() {
         assert_eq!(resync("hello", None, Some("")), Resync::Keep);
         assert_eq!(resync("hello", Some("hell"), None), Resync::Keep);
+    }
+
+    #[test]
+    fn the_composition_caret_stays_inside_the_word() {
+        assert_eq!(composition_caret(5, None), 5);
+        assert_eq!(composition_caret(5, Some(2)), 2);
+        assert_eq!(composition_caret(5, Some(9)), 5);
+        assert_eq!(composition_caret(0, Some(3)), 0);
+    }
+
+    #[test]
+    fn a_selection_without_a_composition_moves_the_cursor() {
+        assert_eq!(caret_placement(0, Some((7, 7)), (3, 3)), CaretPlacement::Plain);
+    }
+
+    #[test]
+    fn a_caret_inside_the_composition_keeps_it() {
+        // Gboard re-composing "hellole": region 0..7, then the caret back to 7.
+        assert_eq!(caret_placement(7, Some((0, 7)), (7, 7)), CaretPlacement::Inside(7..7));
+        assert_eq!(caret_placement(7, Some((0, 7)), (0, 0)), CaretPlacement::Inside(0..0));
+        assert_eq!(caret_placement(3, Some((4, 7)), (5, 6)), CaretPlacement::Inside(1..2));
+    }
+
+    #[test]
+    fn a_caret_outside_the_composition_finishes_it_first() {
+        assert_eq!(caret_placement(3, Some((4, 7)), (9, 9)), CaretPlacement::Outside);
+        assert_eq!(caret_placement(3, Some((4, 7)), (2, 5)), CaretPlacement::Outside);
+    }
+
+    #[test]
+    fn a_composition_egui_no_longer_holds_is_dropped() {
+        assert_eq!(caret_placement(7, Some((7, 7)), (7, 7)), CaretPlacement::Lost);
+        assert_eq!(caret_placement(3, None, (1, 1)), CaretPlacement::Lost);
+    }
+
+    #[test]
+    fn finish_commits_only_the_composition_egui_still_shows() {
+        assert_eq!(finish(7, Some((0, 7)), false), Finish::Commit);
+        // The duplicate-word case: the range collapsed to the caret, committing would re-insert the word.
+        assert_eq!(finish(7, Some((7, 7)), false), Finish::End);
+        // A user selection of another length is not the composition.
+        assert_eq!(finish(7, Some((2, 5)), false), Finish::Drop);
+        assert_eq!(finish(0, Some((0, 7)), false), Finish::Drop);
+    }
+
+    #[test]
+    fn finish_after_a_change_in_the_same_batch_commits() {
+        assert_eq!(finish(3, Some((0, 0)), true), Finish::Commit);
+        assert_eq!(finish(0, Some((0, 0)), true), Finish::Drop);
     }
 
     #[test]

@@ -640,6 +640,52 @@ fn set_state_selection(ctx: &egui::Context, focus: Option<egui::Id>, start: usiz
     state.store(ctx, id);
 }
 
+/// Move egui's cursor to an IME selection without collapsing a composition egui shows; `true` when an event was pushed.
+fn apply_ime_selection(
+    ctx: &egui::Context,
+    focus: Option<egui::Id>,
+    start: usize,
+    end: usize,
+    pending_events: &mut Vec<egui::Event>,
+    later: &mut Vec<ImeEvent>,
+) -> bool {
+    let preedit = LAST_PREEDIT.lock().map(|g| g.clone()).unwrap_or_default();
+    let live = live_selection(ctx, focus);
+    match egui_mobile_core::ime::caret_placement(preedit.chars().count(), live, (start, end)) {
+        egui_mobile_core::ime::CaretPlacement::Plain => {
+            set_state_selection(ctx, focus, start, end);
+            false
+        }
+        egui_mobile_core::ime::CaretPlacement::Inside(caret) => {
+            pending_events.push(egui::Event::Ime(egui::ImeEvent::Preedit {
+                text: preedit,
+                active_range_chars: Some(caret),
+            }));
+            true
+        }
+        egui_mobile_core::ime::CaretPlacement::Outside => {
+            clear_preedit_tracking();
+            pending_events.push(egui::Event::Ime(egui::ImeEvent::Commit(preedit)));
+            later.push(ImeEvent::Selection { start, end, strong: true });
+            true
+        }
+        egui_mobile_core::ime::CaretPlacement::Lost => {
+            clear_preedit_tracking();
+            if live.is_some_and(|(a, b)| a == b) {
+                pending_events.push(egui::Event::Ime(egui::ImeEvent::Preedit {
+                    text: String::new(),
+                    active_range_chars: None,
+                }));
+                later.push(ImeEvent::Selection { start, end, strong: true });
+                true
+            } else {
+                set_state_selection(ctx, focus, start, end);
+                false
+            }
+        }
+    }
+}
+
 /// Apply drained IME events: text/keys → `pending_events`; selection → `TextEditState`.
 /// Returns `true` if any events were applied.
 pub fn apply_pending(
@@ -650,6 +696,17 @@ pub fn apply_pending(
     let mut events = CARRY.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default();
     events.extend(take_pending());
     if events.is_empty() {
+        return false;
+    }
+    // Events drained in a frame with a tap wait one frame, until egui has moved its cursor.
+    if ctx.input(|i| i.pointer.any_pressed() || i.pointer.any_released()) {
+        if TRACE {
+            log::info!("egui-android ime: deferring {} event(s) past a tap", events.len());
+        }
+        if let Ok(mut g) = CARRY.lock() {
+            *g = events;
+        }
+        ctx.request_repaint();
         return false;
     }
     if TRACE {
@@ -687,7 +744,9 @@ pub fn apply_pending(
                     deferred.push(ImeEvent::Selection { start, end, strong });
                     continue;
                 }
-                set_state_selection(ctx, focus, start, end);
+                if apply_ime_selection(ctx, focus, start, end, pending_events, &mut deferred) {
+                    had_mutate = true;
+                }
                 if let Ok(mut g) = LAST_SYNC.lock()
                     && let Some((_, s, e)) = g.as_mut()
                 {
@@ -728,9 +787,10 @@ pub fn apply_pending(
                 if let Ok(mut g) = LAST_PREEDIT.lock() {
                     g.clone_from(&text);
                 }
+                let caret = text.chars().count();
                 pending_events.push(egui::Event::Ime(egui::ImeEvent::Preedit {
                     text,
-                    active_range_chars: None,
+                    active_range_chars: Some(caret..caret),
                 }));
             }
             ImeEvent::Finish => {
@@ -741,9 +801,20 @@ pub fn apply_pending(
                     .lock()
                     .map(|mut g| std::mem::take(&mut *g))
                     .unwrap_or_default();
-                if !preedit.is_empty() {
-                    had_mutate = true;
-                    pending_events.push(egui::Event::Ime(egui::ImeEvent::Commit(preedit)));
+                let live = live_selection(ctx, focus);
+                match egui_mobile_core::ime::finish(preedit.chars().count(), live, had_mutate) {
+                    egui_mobile_core::ime::Finish::Commit => {
+                        had_mutate = true;
+                        pending_events.push(egui::Event::Ime(egui::ImeEvent::Commit(preedit)));
+                    }
+                    egui_mobile_core::ime::Finish::End => {
+                        had_mutate = true;
+                        pending_events.push(egui::Event::Ime(egui::ImeEvent::Preedit {
+                            text: String::new(),
+                            active_range_chars: None,
+                        }));
+                    }
+                    egui_mobile_core::ime::Finish::Drop => {}
                 }
             }
             ImeEvent::Delete { before, after, anchor } => {
@@ -815,9 +886,16 @@ pub fn apply_pending(
                     g.clone_from(&text);
                 }
                 set_state_selection(ctx, focus, start, end);
+                // The mirror's caret, as a position inside the region.
+                let caret = LAST_SYNC
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().and_then(|(_, _, e)| usize::try_from(*e).ok()))
+                    .and_then(|e| e.checked_sub(start));
+                let caret = egui_mobile_core::ime::composition_caret(text.chars().count(), caret);
                 pending_events.push(egui::Event::Ime(egui::ImeEvent::Preedit {
                     text,
-                    active_range_chars: None,
+                    active_range_chars: Some(caret..caret),
                 }));
             }
             ImeEvent::Replace { start, end, text } => {
@@ -957,7 +1035,14 @@ pub fn apply_pending(
             if egui::text_edit::TextEditState::load(ctx, id).is_none() {
                 return true;
             }
-            set_state_selection(ctx, focus, start, end);
+            let mut later = Vec::new();
+            apply_ime_selection(ctx, focus, start, end, pending_events, &mut later);
+            if !later.is_empty() {
+                if let Ok(mut g) = CARRY.lock() {
+                    g.extend(later);
+                }
+                ctx.request_repaint();
+            }
             if let Ok(mut g) = LAST_SYNC.lock() {
                 if let Some((_, s, e)) = g.as_mut() {
                     *s = start as i32;
