@@ -575,6 +575,19 @@ pub fn undoer_in_flux(state: &egui::text_edit::TextEditState) -> bool {
     state.undoer().is_in_flux()
 }
 
+/// The undoer's snapshot text when its flux is a cursor move alone: this pass's `TextEdit` output
+/// event carries the live buffer, and a match means the snapshot is not lagging it.
+fn text_behind_cursor_flux(ctx: &egui::Context, state: &egui::text_edit::TextEditState) -> Option<String> {
+    let live = ctx.output(|o| {
+        o.events.iter().rev().find_map(|e| {
+            let info = e.widget_info();
+            (info.typ == egui::WidgetType::TextEdit).then(|| info.current_text_value.clone()).flatten()
+        })
+    })?;
+    let committed = probe_undoer_text(state)?;
+    (committed == live).then_some(committed)
+}
+
 /// Char-index selection from `TextEditState`, or `(0, 0)` if unset.
 pub fn selection_chars(state: &egui::text_edit::TextEditState) -> (usize, usize) {
     match state.cursor.char_range() {
@@ -1200,7 +1213,7 @@ pub fn resync_out_of_band(ctx: &egui::Context, focus: Option<egui::Id>) -> bool 
 /// a snapshot was actually pushed; callers retry while it is `false` (undoer still in flux or
 /// not yet fed) instead of seeding the EditText with empty/stale text.
 ///
-/// Skips while the undoer is in flux: the EditText already has live IME text from
+/// Skips while the undoer is in flux, unless only the cursor moved: the EditText already has live IME text from
 /// `commitText` / `deleteSurroundingText`, and pushing a lagged undoer snapshot via
 /// `setText` triggers `invalidateInput` every frame (breaks typing).
 ///
@@ -1222,10 +1235,9 @@ fn sync_focused_text_edit_inner(ctx: &egui::Context, focus: Option<egui::Id>, re
     let Some(state) = egui::text_edit::TextEditState::load(ctx, id) else {
         return false;
     };
-    if undoer_in_flux(&state) {
-        return false;
-    }
-    let Some(text) = probe_undoer_text(&state) else {
+    // Waiting out a tap's cursor flux restarted the session after the user opened `?123`.
+    let text = if undoer_in_flux(&state) { text_behind_cursor_flux(ctx, &state) } else { probe_undoer_text(&state) };
+    let Some(text) = text else {
         return false;
     };
     let (start, end) = selection_chars(&state);
