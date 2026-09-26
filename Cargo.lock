@@ -1109,7 +1109,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-egui-android"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1119,7 +1119,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-egui-ios"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1131,7 +1131,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-egui-mobile"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "cargo-egui-android",
@@ -2138,7 +2138,7 @@ dependencies = [
 
 [[package]]
 name = "egui-android"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "android-activity",
  "android_logger",
@@ -2155,7 +2155,7 @@ dependencies = [
 
 [[package]]
 name = "egui-ios"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "egui",
  "egui-ios-plugin-abi",
@@ -2169,7 +2169,7 @@ dependencies = [
 
 [[package]]
 name = "egui-ios-plugin-abi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytemuck",
  "egui",
@@ -2181,7 +2181,7 @@ dependencies = [
 
 [[package]]
 name = "egui-ios-plugin-host"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "egui",
@@ -2203,7 +2203,7 @@ dependencies = [
 
 [[package]]
 name = "egui-ios-plugin-sdk"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "egui",
  "egui-ios-plugin-abi",
@@ -2212,7 +2212,7 @@ dependencies = [
 
 [[package]]
 name = "egui-mobile"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "egui-android",
  "egui-ios",
@@ -2221,7 +2221,7 @@ dependencies = [
 
 [[package]]
 name = "egui-mobile-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "egui",
  "log",
@@ -3247,7 +3247,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hello"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "egui",
  "egui-ios",
@@ -3937,7 +3937,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "local-anima"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "image",
  "log",
@@ -3953,7 +3953,7 @@ dependencies = [
 
 [[package]]
 name = "local-clip"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "image",
  "log",
@@ -3965,7 +3965,7 @@ dependencies = [
 
 [[package]]
 name = "local-rewrite"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -3977,7 +3977,7 @@ dependencies = [
 
 [[package]]
 name = "local-sd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -3994,7 +3994,7 @@ dependencies = [
 
 [[package]]
 name = "local-wd14"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "image",
  "log",
@@ -5420,7 +5420,7 @@ checksum = "e0c5ccf5294c6ccd63a74f1565028353830a9c2f5eb0c682c355c471726a6e3f"
 
 [[package]]
 name = "qnn-rs"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "libloading 0.9.0",
