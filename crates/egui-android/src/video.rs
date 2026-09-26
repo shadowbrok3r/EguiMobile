@@ -737,6 +737,9 @@ fn meta_i64(env: &mut JNIEnv, retriever: &JObject, key_const: &str) -> Option<i6
 
 // ── Audio track (MediaPlayer) ────────────────────────────────────────────────
 
+/// `MediaPlayer.SEEK_CLOSEST` (API 26).
+const MEDIA_PLAYER_SEEK_CLOSEST: i32 = 3;
+
 /// The file's sound, played by a `MediaPlayer` with no surface attached: it renders the audio
 /// track and leaves the video one to [`Source`]. Its playback position is the clock frames are
 /// paced against, so the two stay together without a shared timebase.
@@ -811,13 +814,17 @@ impl Audio {
     /// Jump to `ms`, and don't return until the player's own clock agrees (or 200ms pass). A
     /// position still reporting from before the jump is a trap for anything pacing against it: at
     /// the top of a loop it reads a whole clip ahead of the picture.
+    ///
+    /// `SEEK_CLOSEST`, not the one-argument `seekTo`: that snaps to the video track's previous
+    /// keyframe, and a clip encoded with one keyframe (ComfyUI's H.264) sends the sound back to 0
+    /// on every seek while the picture lands where it was asked.
     pub fn seek(&self, env: &mut JNIEnv, ms: i64) {
         let target = ms.clamp(0, i32::MAX as i64);
         let _ = env.call_method(
             self.player.as_obj(),
             "seekTo",
-            "(I)V",
-            &[JValue::Int(target as i32)],
+            "(JI)V",
+            &[JValue::Long(target), JValue::Int(MEDIA_PLAYER_SEEK_CLOSEST)],
         );
         let _ = env.exception_clear();
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
