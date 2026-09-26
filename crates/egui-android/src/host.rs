@@ -444,6 +444,9 @@ fn share_text(text: &str) {
 /// the transition is picked up on the next frame, which [`crate::ime_bridge::wake`] asks for
 /// immediately so `on_pause` still runs before the process can be reaped.
 static PENDING_ACTIVE: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(-1);
+/// A pause arrived since the last drain. Kept apart from [`PENDING_ACTIVE`] so a resume landing
+/// before the next frame cannot erase it: the app still gets `on_pause`, then `on_resume`.
+static PAUSED_SINCE_DRAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// JNI: `EguiNativeActivity.nativeSetActive(boolean)`.
 #[unsafe(no_mangle)]
@@ -452,6 +455,9 @@ pub extern "system" fn Java_com_github_egui_1mobile_EguiNativeActivity_nativeSet
     _class: jni::objects::JClass,
     active: jni::sys::jboolean,
 ) {
+    if active == 0 {
+        PAUSED_SINCE_DRAIN.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     PENDING_ACTIVE.store(i8::from(active != 0), std::sync::atomic::Ordering::Relaxed);
     crate::ime_bridge::wake();
 }
@@ -474,12 +480,15 @@ pub fn register_lifecycle_natives() {
     log::info!("egui-android lifecycle: register_natives(nativeSetActive) ok={ok}");
 }
 
-/// Take a pending foreground transition, if one arrived since the last call.
-pub fn take_active_change() -> Option<bool> {
+/// The foreground transitions that arrived since the last call, in order: a pause and the resume
+/// after it both come back when no frame ran between them.
+pub fn take_active_changes() -> Vec<bool> {
+    let paused = PAUSED_SINCE_DRAIN.swap(false, std::sync::atomic::Ordering::Relaxed);
     match PENDING_ACTIVE.swap(-1, std::sync::atomic::Ordering::Relaxed) {
-        1 => Some(true),
-        0 => Some(false),
-        _ => None,
+        1 if paused => vec![false, true],
+        1 => vec![true],
+        0 => vec![false],
+        _ => Vec::new(),
     }
 }
 

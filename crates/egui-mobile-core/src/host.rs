@@ -150,6 +150,7 @@ struct HostState {
     permissions: [Option<bool>; 2],
     mic_level: f32,
     haptic_cb: Option<extern "C" fn(i32)>,
+    text_actions_anchor: Option<egui::Rect>,
 }
 
 /// Cheap clonable handle the app calls from `update`. All methods are main-thread only.
@@ -173,6 +174,7 @@ impl Host {
                 permissions: [None, None],
                 mic_level: 0.0,
                 haptic_cb: None,
+                text_actions_anchor: None,
             })),
         }
     }
@@ -283,6 +285,12 @@ impl Host {
     pub fn mic_level(&self) -> f32 {
         self.inner.borrow().mic_level
     }
+
+    /// Draw the Android Paste/Copy/Cut/Select-all bar just above `rect` this frame, centred on it,
+    /// instead of just above the keyboard. Cleared after every frame; iOS draws no bar.
+    pub fn set_text_actions_anchor(&self, rect: Option<egui::Rect>) {
+        self.inner.borrow_mut().text_actions_anchor = rect;
+    }
 }
 
 /// Driver API used by the per-platform runtime to drain requests and feed state. Not for apps.
@@ -319,6 +327,11 @@ impl Host {
 
     pub fn drv_set_safe_area(&self, top: f32, bottom: f32, left: f32, right: f32) {
         self.inner.borrow_mut().safe_area = Insets { top, bottom, left, right };
+    }
+
+    /// Take this frame's [`Host::set_text_actions_anchor`], clearing it for the next.
+    pub fn drv_take_text_actions_anchor(&self) -> Option<egui::Rect> {
+        self.inner.borrow_mut().text_actions_anchor.take()
     }
 
     pub fn drv_set_keyboard_height(&self, pts: f32) {

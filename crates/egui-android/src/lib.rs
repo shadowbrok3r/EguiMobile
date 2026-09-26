@@ -60,6 +60,8 @@ struct Adapter {
     ime_show_watch: egui_mobile_core::ime::ShowWatch,
     /// Points subtracted from `screen_rect.max.y` this frame for the soft keyboard.
     ime_inset_pt: f32,
+    /// Text field that was being edited when the app went to the background, refocused on resume.
+    resume_focus: Option<egui::Id>,
 }
 
 impl Adapter {
@@ -90,12 +92,15 @@ impl eframe::App for Adapter {
         // the JNI side asks for a frame, so a pause still reaches the app before the OS may reap
         // the process. `drv_set_active` returns the previous value, so a repeated event is not a
         // second callback.
-        if let Some(active) = crate::host::take_active_change() {
+        for active in crate::host::take_active_changes() {
             let was = self.host.drv_set_active(active);
             if was != active {
                 if active {
                     self.app.on_resume(&self.host);
+                    self.resume_ime(ui.ctx());
                 } else {
+                    // Leaving drops the keyboard, which tears the session down and surrenders focus.
+                    self.resume_focus = if self.ime_bridge_hot { self.last_focus } else { None };
                     self.app.on_pause(&self.host);
                 }
             }
@@ -504,6 +509,24 @@ impl Adapter {
         self.pending_events.clear();
     }
 
+    /// Reopen the IME session on the field that was being edited when the app was paused: the
+    /// same focus and restart seed a tap gives, so typing lands without tapping the field again.
+    fn resume_ime(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.resume_focus.take() else { return };
+        ctx.memory_mut(|m| m.request_focus(id));
+        // A dismissal latched on the way out would tear the reopened session straight back down.
+        let _ = crate::ime_bridge::take_dismissed();
+        crate::ime_bridge::discard_pending();
+        self.last_focus = Some(id);
+        self.ime_synced_focus = None;
+        self.ime_force_sync = true;
+        self.ime_seed_restart = true;
+        if self.ime_bridge_hot {
+            self.ime_show_watch.requested(ctx.input(|i| i.time));
+            let _ = crate::ime_bridge::show_ime_force();
+        }
+    }
+
     /// Restore text-field focus after a bar tap.
     /// Skips when already focused — `Memory::request_focus` always sets `interrupt_ime`, and
     /// egui-winit then does `set_ime_allowed(false/true)` which hides our keyboard and fails
@@ -520,6 +543,7 @@ impl Adapter {
     /// Android equivalent of the selection context menu, since egui draws its own text widgets.
     fn text_actions_bar(&mut self, ui: &egui::Ui, rect: egui::Rect, has_focus: bool) {
         let ctx = ui.ctx().clone();
+        let anchor = self.host.drv_take_text_actions_anchor();
         let keyboard = self.host.keyboard_height();
         let ime_wanted = ctx.output(|o| o.ime.is_some());
         let guest_kb = crate::host::keyboard_requested();
@@ -555,7 +579,11 @@ impl Adapter {
             0.0
         };
         let keyboard_top = (rect.bottom() - overlap).max(rect.top() + 1.0);
-        let pos = egui::pos2(rect.center().x, keyboard_top - 8.0);
+        // An app anchor moves the bar over its own content, still never below the keyboard's top.
+        let pos = match anchor {
+            Some(a) => egui::pos2(a.center().x, a.top().min(keyboard_top) - 8.0),
+            None => egui::pos2(rect.center().x, keyboard_top - 8.0),
+        };
         let mut acted = false;
         let area = egui::Area::new(egui::Id::new("egui-android-text-actions"))
             .order(egui::Order::Foreground)
@@ -749,6 +777,7 @@ pub fn run_with_depth(
                 ime_stray: egui_mobile_core::ime::StrayKeyboard::default(),
                 ime_show_watch: egui_mobile_core::ime::ShowWatch::default(),
                 ime_inset_pt: 0.0,
+                resume_focus: None,
             }))
         }),
     );
