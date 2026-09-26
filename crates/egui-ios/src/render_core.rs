@@ -125,6 +125,7 @@ impl RenderCore {
         egui_ctx.set_pixels_per_point(ppp);
         // Debug builds only: reports any widget clipped by the screen edge.
         egui_mobile_core::overflow::install(&egui_ctx);
+        egui_mobile_core::magnifier::install(&egui_ctx);
 
         RenderCore {
             device,

@@ -11,6 +11,7 @@ mod host;
 #[doc(hidden)]
 pub mod ime;
 pub mod keyboard;
+pub mod magnifier;
 pub mod overflow;
 
 pub use app::{CreateContext, EguiApp};

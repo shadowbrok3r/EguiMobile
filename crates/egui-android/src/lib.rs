@@ -194,6 +194,7 @@ impl eframe::App for Adapter {
             r.max.y -= insets.bottom;
         }
         egui_mobile_core::overflow::set_content_bounds(ui.ctx(), rect);
+        egui_mobile_core::magnifier::set_content_bounds(ui.ctx(), rect);
         ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
             self.app.update(ui, &self.host);
         });
@@ -721,6 +722,7 @@ pub fn run_with_depth(
             app.theme(&cc.egui_ctx);
             // Debug builds only: reports any widget clipped by the content edge.
             egui_mobile_core::overflow::install(&cc.egui_ctx);
+            egui_mobile_core::magnifier::install(&cc.egui_ctx);
             Ok(Box::new(Adapter {
                 app,
                 host: Host::new(),

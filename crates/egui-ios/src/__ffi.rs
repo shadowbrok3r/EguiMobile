@@ -109,7 +109,16 @@ pub unsafe fn render(h: *mut c_void, time_seconds: f64) {
         let core = &mut rt.core;
         let app = &mut rt.app;
         let host = &rt.host;
-        core.render(time_seconds, |ui| app.update(ui, host));
+        core.render(time_seconds, |ui| {
+            let i = host.safe_area_insets();
+            let r = ui.max_rect();
+            let content = egui::Rect::from_min_max(
+                egui::pos2(r.left() + i.left, r.top() + i.top),
+                egui::pos2(r.right() - i.right, r.bottom() - i.bottom),
+            );
+            egui_mobile_core::magnifier::set_content_bounds(ui.ctx(), content);
+            app.update(ui, host)
+        });
         if let Some(url) = core.take_open_url() {
             host.open_url(url);
         }
