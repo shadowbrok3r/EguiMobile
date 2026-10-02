@@ -37,6 +37,9 @@ pub struct Frame {
 /// Permanently attach the calling thread to the JVM and hand back its env. Call once at the top of
 /// a decode thread; the thread detaches itself when it terminates. The `JavaVM` wrapper lives in a
 /// static so the returned env's borrow is `'static`.
+mod surface;
+pub use surface::{GpuVideoSurface, SurfacePlayer, SurfaceStatus};
+
 pub fn attach_env() -> Option<JNIEnv<'static>> {
     static VM: std::sync::OnceLock<JavaVM> = std::sync::OnceLock::new();
     let vm = match VM.get() {

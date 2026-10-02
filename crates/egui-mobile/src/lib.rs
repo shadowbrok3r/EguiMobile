@@ -41,6 +41,10 @@ pub use egui_android::{Backend, glow_context, run_with, run_with_depth};
 #[cfg(target_os = "android")]
 pub use egui_android::HostExt;
 
+/// Run a JNI operation with the actual Activity and a bounded local-reference frame.
+#[cfg(target_os = "android")]
+pub use egui_android::host::with_native_activity;
+
 /// Screen orientation lock (landscape / unspecified).
 #[cfg(target_os = "android")]
 pub use egui_android::ScreenOrientation;

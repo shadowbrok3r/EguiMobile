@@ -158,7 +158,7 @@ const JNI_FRAME: i32 = 16;
 /// returned object ref would otherwise stay a GC root until exit. The thumbnail path alone leaks a
 /// `Bitmap` plus a `w*h` `int[]` per tile that way. Nothing may return a `JObject` out of `f` —
 /// popping the frame frees it.
-pub(crate) fn with_native_activity<R>(
+pub fn with_native_activity<R>(
     f: impl FnOnce(&mut jni::JNIEnv, &JObject) -> jni::errors::Result<R>,
 ) -> Option<R> {
     let app = ANDROID_APP.get()?;

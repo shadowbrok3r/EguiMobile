@@ -21,6 +21,7 @@ eframe = { version = "0.36", default-features = false, features = [
 ] }
 # Same 0.17 that egui_glow 0.36 pins, so there is one glow in the graph.
 glow = "0.17"
+egui_glow = "0.36"
 android-activity = { version = "0.6", features = ["native-activity"] }
 # Capability bridge: call Android APIs from Rust. jni 0.21 (stable, well-documented) drives the
 # calls; the raw JavaVM/Activity come from ndk-context (version-agnostic), so android-activity's
