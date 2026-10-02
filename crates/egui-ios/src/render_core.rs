@@ -126,6 +126,7 @@ impl RenderCore {
         // Debug builds only: reports any widget clipped by the screen edge.
         egui_mobile_core::overflow::install(&egui_ctx);
         egui_mobile_core::magnifier::install(&egui_ctx);
+        egui_mobile_core::text_gestures::install(&egui_ctx);
 
         RenderCore {
             device,

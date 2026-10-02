@@ -15,6 +15,7 @@
 
 pub use egui_mobile_core::{
     CreateContext, EguiApp, Haptic, Host, Insets, Permission, StylusProbe, egui, keyboard, magnifier, overflow,
+    text_gestures,
 };
 
 /// The entry-point macro. Emits the iOS C ABI when building for iOS and `android_main` when

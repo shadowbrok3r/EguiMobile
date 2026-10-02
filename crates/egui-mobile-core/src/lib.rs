@@ -13,6 +13,7 @@ pub mod ime;
 pub mod keyboard;
 pub mod magnifier;
 pub mod overflow;
+pub mod text_gestures;
 
 pub use app::{CreateContext, EguiApp};
 pub use host::{Haptic, Host, HostRequest, Insets, Permission, StylusProbe};

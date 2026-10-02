@@ -87,12 +87,14 @@ fn target(ctx: &Context) -> Option<Target> {
     let ime = ctx.output(|o| o.ime)?;
     let id = ctx.memory(|m| m.focused())?;
     egui::text_edit::TextEditState::load(ctx, id)?;
-    let layer = ctx.viewport(|v| v.this_pass.widgets.get(id).map(|w| w.layer_id))?;
+    let (layer, rect) = ctx.viewport(|v| v.this_pass.widgets.get(id).map(|w| (w.layer_id, w.interact_rect)))?;
     let (down, finger, origin, held, dragging) = ctx.input(|i| {
         let p = &i.pointer;
         (p.primary_down(), p.latest_pos(), p.press_origin(), p.press_start_time().map(|t| i.time - t), p.is_decidedly_dragging())
     });
-    if !down || !ime.rect.expand(4.0).contains(origin?) {
+    // The field's box, not `ime.rect`, which ends with the text.
+    let field = ctx.layer_transform_to_global(layer).unwrap_or_default() * rect;
+    if !down || !field.expand(4.0).contains(origin?) {
         return None;
     }
     let held = held?;
@@ -264,6 +266,18 @@ mod tests {
         frame(&ctx, &mut text, 0.0, Vec::new());
         frame(&ctx, &mut text, 0.1, touch(pos2(20.0, 310.0), true));
         assert!(frame(&ctx, &mut text, 0.15, vec![Event::PointerMoved(pos2(60.0, 310.0))]));
+    }
+
+    #[test]
+    fn a_hold_past_the_end_of_the_text_shows_the_lens() {
+        let ctx = Context::default();
+        install(&ctx);
+        let mut text = String::from("hello");
+        let at = pos2(200.0, 310.0);
+        ctx.memory_mut(|m| m.request_focus(Id::new("field")));
+        frame(&ctx, &mut text, 0.0, Vec::new());
+        frame(&ctx, &mut text, 0.1, touch(at, true));
+        assert!(frame(&ctx, &mut text, 0.1 + HOLD_SECS + 0.05, Vec::new()));
     }
 
     #[test]

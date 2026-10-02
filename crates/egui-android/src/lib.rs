@@ -751,6 +751,7 @@ pub fn run_with_depth(
             // Debug builds only: reports any widget clipped by the content edge.
             egui_mobile_core::overflow::install(&cc.egui_ctx);
             egui_mobile_core::magnifier::install(&cc.egui_ctx);
+            egui_mobile_core::text_gestures::install(&cc.egui_ctx);
             Ok(Box::new(Adapter {
                 app,
                 host: Host::new(),
