@@ -104,7 +104,7 @@ pub fn register_natives() {
     log::info!("egui-android ime: register_natives(nativeImeWake) ok={ok}");
 }
 
-/// Whether `activity` is `EguiNativeActivity`.
+/// Whether `activity` is `EguiNativeActivity` or an app subclass of it.
 ///
 /// Must not use `FindClass` for the app class: on the render thread JNI uses the system
 /// ClassLoader, which cannot see `com.github.egui_mobile.*` and throws ClassNotFoundException.
@@ -112,13 +112,22 @@ fn is_egui_activity(env: &mut jni::JNIEnv, activity: &jni::objects::JObject) -> 
     if let Some(&cached) = IS_EGUI_ACTIVITY.get() {
         return Ok(cached);
     }
-    let cls = env.get_object_class(activity)?;
-    let name_obj = env
-        .call_method(&cls, "getName", "()Ljava/lang/String;", &[])?
-        .l()?;
-    let js: JString = name_obj.into();
-    let name: String = env.get_string(&js)?.into();
-    let ok = name == ACTIVITY_CLASS_NAME;
+    let mut cls = Some(env.get_object_class(activity)?);
+    let mut ok = false;
+    while let Some(current) = cls {
+        let name_obj = env
+            .call_method(&current, "getName", "()Ljava/lang/String;", &[])?
+            .l()?;
+        let js: JString = name_obj.into();
+        let name: String = env.get_string(&js)?.into();
+        env.delete_local_ref(js)?;
+        if name == ACTIVITY_CLASS_NAME {
+            ok = true;
+            break;
+        }
+        cls = env.get_superclass(&current)?;
+        env.delete_local_ref(current)?;
+    }
     let _ = IS_EGUI_ACTIVITY.set(ok);
     Ok(ok)
 }
