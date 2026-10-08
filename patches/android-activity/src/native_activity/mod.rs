@@ -592,9 +592,16 @@ impl InputIteratorInner<'_> {
                     _ => todo!("NDK added a new type"),
                 };
 
+                // Joystick motion is finished unhandled, never passed on to be read as a touch.
+                let joystick = matches!(&event, input::InputEvent::MotionEvent(m) if m.source().is_joystick_class());
+
                 // `finish_event` needs to be called for each event otherwise
                 // the app would likely get an ANR
-                let result = std::panic::catch_unwind(AssertUnwindSafe(|| callback(&event)));
+                let result = if joystick {
+                    Ok(InputStatus::Unhandled)
+                } else {
+                    std::panic::catch_unwind(AssertUnwindSafe(|| callback(&event)))
+                };
 
                 let ndk_event = match event {
                     input::InputEvent::MotionEvent(e) => {
