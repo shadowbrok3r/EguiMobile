@@ -34,7 +34,7 @@ use self::{
 pub use self::{
     background_pattern::{BackgroundPattern, Grid},
     pin::{AnyPins, PinInfo, PinShape, PinWireInfo, SnarlPin},
-    state::get_selected_nodes,
+    state::{get_selected_nodes, set_selected_nodes},
     viewer::SnarlViewer,
     wire::{WireLayer, WireStyle},
 };
@@ -1281,7 +1281,9 @@ where
             };
 
             if viewer.has_dropped_wire_menu(pins, snarl) {
-                snarl_resp.context_menu(|ui| {
+                egui::Popup::context_menu(&snarl_resp)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| {
                     let pins = match &new_wires {
                         NewWires::In(x) => AnyPins::In(x),
                         NewWires::Out(x) => AnyPins::Out(x),
@@ -1302,11 +1304,15 @@ where
                 });
             }
         } else if viewer.has_graph_menu(interact_pos, snarl) {
-            snarl_resp.context_menu(|ui| {
-                let menu_pos = from_global * ui.cursor().min;
+            // The graph menu contains search and category controls. Keep it
+            // open for those interactions; node actions close it explicitly.
+            egui::Popup::context_menu(&snarl_resp)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| {
+                    let menu_pos = from_global * ui.cursor().min;
 
-                viewer.show_graph_menu(menu_pos, ui, snarl);
-            });
+                    viewer.show_graph_menu(menu_pos, ui, snarl);
+                });
         }
     }
 
