@@ -420,15 +420,13 @@ pub fn sync_caret_to_ime(start: usize, end: usize, user_tap: bool) {
         // surface says so directly (keyboard touches never reach egui). Finish the composition
         // in place first, else the IME re-anchors it and retypes the word at the tap point.
         if user_tap || (caret - mirror).unsigned_abs() as usize > preedit_len {
-            if let Ok(mut g) = LAST_PREEDIT.lock() {
-                g.clear();
-            }
             sync_selection_to_ime(caret as usize, caret as usize, true);
             // egui must also leave composition, or it never paints a caret again
-            // (cursor_purpose stays ImeComposition). Empty Preedit resets it; the buffer
-            // already holds the preedit text and the tap collapsed the selection.
+            // (cursor_purpose stays ImeComposition). Finish runs after egui has handled the tap:
+            // a tap outside the field leaves the word selected, and an empty Preedit would
+            // delete it, so Finish commits it; a tap that moved the caret just ends composing.
             if let Ok(mut g) = CARRY.lock() {
-                g.push(ImeEvent::Preedit(String::new()));
+                g.push(ImeEvent::Finish);
             }
             if let Ok(g) = WAKE_CTX.lock()
                 && let Some(ctx) = g.as_ref()
