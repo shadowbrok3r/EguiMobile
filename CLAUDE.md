@@ -58,6 +58,11 @@ emulator is the cheap one: `cargo egui-mobile emulator boot`, `cargo egui-mobile
 — a release APK aborts on an emulator inside the `jni` crate before any app code runs, which is
 the emulator and not the build, so only a phone can confirm a release build works.
 
+The emulator's Gboard commits each letter as it is typed and never leaves a word composing, and
+`adb shell input text` bypasses the IME, so neither reproduces a phone keyboard's composition.
+For IME behaviour around a composing word, select `tests/compose-ime` (README there) and drive
+`setComposingText` / `commitText` / `finishComposingText` from adb.
+
 A control drawn inside `safe_area_insets()` is **painted but not tappable**: the system keeps those
 touches. The insets come from `getCurrentWindowMetrics()` and include the **display cutout**, not
 just the system bars — `status_bar_height` is a static 24dp dimen and a tall camera cutout is
