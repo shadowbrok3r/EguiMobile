@@ -124,7 +124,7 @@ impl eframe::App for Adapter {
             self.ime_teardown(ui.ctx());
         }
         self.bar_touch |= pressed_in_bar;
-        let hold = self.bar_touch || self.ime_hold_frames > 0;
+        let mut hold = self.bar_touch || self.ime_hold_frames > 0;
         // The focused field was not laid out last frame — the app switched tab/page or closed the
         // section holding it mid-edit. egui's focus dead-man switch drops it, but `pin_text_focus`
         // re-requests it every frame, so the keyboard and the actions bar outlive the widget they
@@ -204,6 +204,17 @@ impl eframe::App for Adapter {
             self.app.update(ui, &self.host);
         });
         let focused = ui.ctx().memory(|m| m.focused());
+        // Enter ended a single-line edit: the TextEdit surrendered focus during the app frame, and
+        // pin_text_focus would restore it and keep the keyboard up.
+        if self.ime_bridge_hot
+            && focused.is_none()
+            && self.last_focus.is_some()
+            && ui.ctx().input(|i| i.key_pressed(egui::Key::Enter))
+        {
+            self.ime_teardown(ui.ctx());
+            ui.ctx().output_mut(|o| o.ime = None);
+            hold = false;
+        }
         // Text-edit focus only: plugin viewports focus on any press to route keys to the guest, and
         // any-widget focus would raise the soft keyboard for plain taps. Plugins that draw their own
         // text (the terminal) ask via `Host::request_keyboard` -> `guest_kb`.
