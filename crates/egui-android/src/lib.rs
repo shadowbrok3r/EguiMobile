@@ -58,8 +58,8 @@ struct Adapter {
     ime_stray: egui_mobile_core::ime::StrayKeyboard,
     /// Times a keyboard show request that has not produced a keyboard yet.
     ime_show_watch: egui_mobile_core::ime::ShowWatch,
-    /// Points subtracted from `screen_rect.max.y` this frame for the soft keyboard.
-    ime_inset_pt: f32,
+    /// Layout space owned by the clipboard toolbar, separate from editable app content.
+    text_actions: text_actions::Dock,
     /// Text field that was being edited when the app went to the background, refocused on resume.
     resume_focus: Option<egui::Id>,
 }
@@ -187,17 +187,12 @@ impl eframe::App for Adapter {
             });
         }
         let insets = self.host.safe_area_insets();
-        // `screen_rect` was shortened by the keyboard in `raw_input_hook`; `rect` is that reduced
-        // area (given to the app), `full_rect` restores full height for the text-actions bar.
+        // The IME and text toolbar were both removed from screen_rect in raw_input_hook.
         let mut rect = ui.max_rect();
-        let mut full_rect = rect;
-        full_rect.max.y += self.ime_inset_pt;
-        for r in [&mut rect, &mut full_rect] {
-            r.min.x += insets.left;
-            r.min.y += insets.top;
-            r.max.x -= insets.right;
-            r.max.y -= insets.bottom;
-        }
+        rect.min.x += insets.left;
+        rect.min.y += insets.top;
+        rect.max.x -= insets.right;
+        rect.max.y -= insets.bottom;
         egui_mobile_core::overflow::set_content_bounds(ui.ctx(), rect);
         egui_mobile_core::magnifier::set_content_bounds(ui.ctx(), rect);
         ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
@@ -453,7 +448,7 @@ impl eframe::App for Adapter {
         if let Some(text) = copied {
             self.host.copy_text(text);
         }
-        self.text_actions_bar(ui, full_rect, text_focus);
+        self.text_actions_bar(ui, text_focus);
         // Clear bar_touch only after the bar has handled this frame's release/click.
         if self.bar_touch && ui.ctx().input(|i| !i.pointer.any_down()) {
             self.bar_touch = false;
@@ -472,19 +467,20 @@ impl eframe::App for Adapter {
         // Feed Android WindowInsets (status bar / camera cutout / nav bar / IME) into the host so
         // `host.safe_area_insets()` and `host.keyboard_height()` track the current frame.
         crate::host::update_insets(&self.host, ctx.pixels_per_point());
-        // Shrink egui's layout viewport by the keyboard's occlusion (points) so the whole UI —
-        // central panel, ctx-level windows and popups — lays out above the soft keyboard. The GL
+        // Shrink egui's layout viewport by the keyboard and toolbar (points) so the whole UI —
+        // central panel, ctx-level windows and popups — lays out above both. The GL
         // surface stays full-size; only `screen_rect` shrinks. `keyboard_height()` is in points.
-        self.ime_inset_pt = 0.0;
-        let inset = (self.host.keyboard_height() - self.host.safe_area_insets().bottom).max(0.0);
-        if inset <= 0.0 {
-            return;
-        }
-        if let Some(rect) = raw_input.screen_rect.as_mut()
-            && inset < rect.height() - 1.0
-        {
-            rect.max.y -= inset;
-            self.ime_inset_pt = inset;
+        let safe = self.host.safe_area_insets();
+        let inset = (self.host.keyboard_height() - safe.bottom).max(0.0);
+        if let Some(rect) = raw_input.screen_rect.as_mut() {
+            if inset > 0.0 && inset < rect.height() - 1.0 {
+                rect.max.y -= inset;
+            }
+            let bounds = egui::Rect::from_min_max(
+                rect.min + egui::vec2(safe.left, safe.top),
+                rect.max - egui::vec2(safe.right, safe.bottom),
+            );
+            rect.max.y -= self.text_actions.reserve(ctx, bounds);
         }
     }
 }
@@ -512,6 +508,8 @@ impl Adapter {
         self.ime_hide_arm = 0;
         self.ime_hold_frames = 0;
         self.bar_touch = false;
+        self.bar_rect = None;
+        self.text_actions.set_visible(ctx, false);
         self.ime_force_sync = false;
         self.ime_seed_restart = false;
         self.last_focus = None;
@@ -523,7 +521,9 @@ impl Adapter {
     /// Reopen the IME session on the field that was being edited when the app was paused: the
     /// same focus and restart seed a tap gives, so typing lands without tapping the field again.
     fn resume_ime(&mut self, ctx: &egui::Context) {
-        let Some(id) = self.resume_focus.take() else { return };
+        let Some(id) = self.resume_focus.take() else {
+            return;
+        };
         ctx.memory_mut(|m| m.request_focus(id));
         // A dismissal latched on the way out would tear the reopened session straight back down.
         let _ = crate::ime_bridge::take_dismissed();
@@ -550,9 +550,9 @@ impl Adapter {
         ctx.memory_mut(|m| m.request_focus(id));
     }
 
-    /// Floating Paste/Copy/Cut/Select-all bar shown while a text field is being edited — the
+    /// Docked Paste/Copy/Cut/Select-all bar shown while a text field is being edited — the
     /// Android equivalent of the selection context menu, since egui draws its own text widgets.
-    fn text_actions_bar(&mut self, ui: &egui::Ui, rect: egui::Rect, has_focus: bool) {
+    fn text_actions_bar(&mut self, ui: &egui::Ui, has_focus: bool) {
         let ctx = ui.ctx().clone();
         let anchor = self.host.drv_take_text_actions_anchor();
         let keyboard = self.host.keyboard_height();
@@ -565,6 +565,7 @@ impl Adapter {
             || guest_kb
             || (ime_wanted && has_focus)
             || (keyboard > 0.0 && (has_focus || guest_kb));
+        self.text_actions.set_visible(&ctx, show);
         if !show {
             self.next_clip_poll = 0;
             self.bar_rect = None;
@@ -575,71 +576,28 @@ impl Adapter {
             self.has_clip = crate::host::clipboard_has_text();
             self.next_clip_poll = self.frame + 30;
         }
-        // Fixed just above the keyboard and horizontally centred — the same place every frame,
-        // whatever field is focused and wherever the caret sits. `rect` is the full-height safe
-        // area and `ime_inset_pt` is what this frame's layout was shortened by, so their difference
-        // is the keyboard's top edge, in lockstep with the layout the app just drew. Before the
-        // first inset lands — and on a window that never resizes for the IME, or a guest viewport
-        // that asked for the keyboard itself — assume a typical keyboard fraction rather than
-        // parking the bar behind the keys.
-        let overlap = if self.ime_inset_pt > 0.0 {
-            self.ime_inset_pt
-        } else if guest_kb || (self.ime_bridge_hot && !self.ime_seen_open) {
-            rect.height() * 0.4
-        } else {
-            0.0
-        };
-        let keyboard_top = (rect.bottom() - overlap).max(rect.top() + 1.0);
-        // An app anchor moves the bar over its own content, still never below the keyboard's top.
-        let pos = match anchor {
-            Some(a) => egui::pos2(a.center().x, a.top().min(keyboard_top) - 8.0),
-            None => egui::pos2(rect.center().x, keyboard_top - 8.0),
-        };
+        let action = self.text_actions.show(&ctx, self.has_clip, anchor);
+        self.bar_rect = self.text_actions.rect;
         let mut acted = false;
-        let area = egui::Area::new(egui::Id::new("egui-android-text-actions"))
-            .order(egui::Order::Foreground)
-            .pivot(egui::Align2::CENTER_BOTTOM)
-            .fixed_pos(pos)
-            // Clamped to the area above the keyboard, so an over-tall bar rides up instead of down
-            // over the keys.
-            .constrain_to(egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, keyboard_top)))
-            .show(&ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.spacing_mut().button_padding = egui::vec2(10.0, 8.0);
-                    ui.horizontal(|ui| {
-                        let icon = |s: &str| egui::RichText::new(s).size(20.0);
-                        if ui
-                            .add_enabled(self.has_clip, egui::Button::new(icon("📋")))
-                            .on_hover_text("Paste")
-                            .clicked()
-                            && let Some(text) = crate::host::read_clipboard_text()
-                        {
-                            self.pending_events.push(egui::Event::Paste(text));
-                            acted = true;
-                        }
-                        if ui.button(icon("📄")).on_hover_text("Copy").clicked() {
-                            self.pending_events.push(egui::Event::Copy);
-                            acted = true;
-                        }
-                        if ui.button(icon("✂")).on_hover_text("Cut").clicked() {
-                            self.pending_events.push(egui::Event::Cut);
-                            acted = true;
-                        }
-                        if ui.button(icon("Aa")).on_hover_text("Select all").clicked() {
-                            // Live TextEdit buffer (not the lagged undoer snapshot).
-                            self.pending_events.push(egui::Event::Key {
-                                key: egui::Key::A,
-                                physical_key: None,
-                                pressed: true,
-                                repeat: false,
-                                modifiers: egui::Modifiers::COMMAND,
-                            });
-                            acted = true;
-                        }
-                    });
-                });
-            });
-        self.bar_rect = Some(area.response.rect);
+        if let Some(action) = action {
+            use text_actions::Action;
+            let event = match action {
+                Action::Paste => crate::host::read_clipboard_text().map(egui::Event::Paste),
+                Action::Copy => Some(egui::Event::Copy),
+                Action::Cut => Some(egui::Event::Cut),
+                Action::SelectAll => Some(egui::Event::Key {
+                    key: egui::Key::A,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::COMMAND,
+                }),
+            };
+            if let Some(event) = event {
+                self.pending_events.push(event);
+                acted = true;
+            }
+        }
         // Pin focus after a bar tap. Rising-edge show only if the IME was already down.
         if acted {
             self.ime_hold_frames = self.ime_hold_frames.max(24);
@@ -788,7 +746,7 @@ pub fn run_with_depth(
                 ime_kind: egui_mobile_core::keyboard::KindLatch::default(),
                 ime_stray: egui_mobile_core::ime::StrayKeyboard::default(),
                 ime_show_watch: egui_mobile_core::ime::ShowWatch::default(),
-                ime_inset_pt: 0.0,
+                text_actions: text_actions::Dock::default(),
                 resume_focus: None,
             }))
         }),
@@ -797,6 +755,8 @@ pub fn run_with_depth(
         log::error!("egui-android run_native failed: {e}");
     }
 }
+
+mod text_actions;
 
 pub mod host;
 pub mod ime_bridge;
@@ -830,7 +790,9 @@ macro_rules! app {
     ($factory:path, $backend:expr, $depth:expr) => {
         #[unsafe(no_mangle)]
         fn android_main(app: $crate::AndroidApp) {
-            $crate::run_with_depth(app, $backend, $depth, |cc| ::std::boxed::Box::new($factory(cc)));
+            $crate::run_with_depth(app, $backend, $depth, |cc| {
+                ::std::boxed::Box::new($factory(cc))
+            });
         }
     };
 }

@@ -9,6 +9,8 @@ use egui_mobile::{CreateContext, EguiApp, Haptic, Host, HostExt, Permission, app
 const BIG_SHARE_MIB: usize = 220;
 
 struct Demo {
+    text_actions_test: bool,
+    multiline: String,
     count: u32,
     slider: f32,
     text: String,
@@ -23,6 +25,8 @@ struct Demo {
 impl Demo {
     fn new(_cc: &CreateContext) -> Self {
         Demo {
+            text_actions_test: false,
+            multiline: (1..=20).map(|n| format!("Editable line {n}\n")).collect(),
             count: 0,
             slider: 0.5,
             text: "edit me".to_owned(),
@@ -86,7 +90,9 @@ impl Demo {
                         "egui-big-220mb.bin",
                         "application/octet-stream",
                     ),
-                    Err(e) => self.share_status = format!("could not write {}: {e}", path.display()),
+                    Err(e) => {
+                        self.share_status = format!("could not write {}: {e}", path.display())
+                    }
                 }
             }
             if ui.button("Removed file").clicked() {
@@ -136,7 +142,30 @@ impl EguiApp for Demo {
     }
 
     fn update(&mut self, ui: &mut egui::Ui, host: &Host) {
+        if self.text_actions_test {
+            ui.horizontal(|ui| {
+                if ui.button("Back to demo").clicked() {
+                    self.text_actions_test = false;
+                }
+                ui.heading("Text actions");
+            });
+            ui.label("Edit the last line, rotate, then try all four toolbar actions.");
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.label("Single line (Enter dismisses):");
+                ui.text_edit_singleline(&mut self.text);
+                ui.label("Multiline (Enter adds a line):");
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.multiline)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(20),
+                );
+            });
+            return;
+        }
         ui.heading("egui on Android");
+        if ui.button("Text actions").clicked() {
+            self.text_actions_test = true;
+        }
         ui.separator();
 
         if ui.button(format!("Tapped {} times", self.count)).clicked() {

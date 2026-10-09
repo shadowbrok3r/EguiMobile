@@ -286,8 +286,9 @@ impl Host {
         self.inner.borrow().mic_level
     }
 
-    /// Draw the Android Paste/Copy/Cut/Select-all bar just above `rect` this frame, centred on it,
-    /// instead of just above the keyboard. Cleared after every frame; iOS draws no bar.
+    /// Horizontally centre the Android text-actions bar on `rect` this frame, clamped to
+    /// the safe area. The bar stays in its own reserved strip above the keyboard, so an
+    /// anchor cannot cover the editable content. Cleared each frame; iOS draws no bar.
     pub fn set_text_actions_anchor(&self, rect: Option<egui::Rect>) {
         self.inner.borrow_mut().text_actions_anchor = rect;
     }

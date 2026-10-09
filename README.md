@@ -156,9 +156,13 @@ Android specifics handled by the runtime:
   `HostExt::take_share_outcome()` then reports `Ok(folder)` once the share sheet opened, or
   `Err(reason)` with nothing left behind in MediaStore.
 - **Clipboard + text actions**: egui has no Android selection menu, so while a text field
-  is being edited the runtime overlays a floating **Paste / Copy / Cut / Select all** bar,
+  is being edited the runtime reserves a strip above the keyboard for
+  **Paste / Copy / Cut / Select all**. App layouts, windows and scroll areas receive
+  the remaining space, so the toolbar cannot cover the text or caret. The runtime
   bridges egui copies into the system clipboard via JNI, and injects clipboard text back
   as paste events. This works for host-side text fields and WASM-plugin text fields alike.
+  Host layout/button regressions: `cargo test --manifest-path tests/text-actions/Cargo.toml`.
+  The Android Hello demo has a **Text actions** screen for multiline and keyboard checks.
 - **Dark system window**: `EguiNativeActivity` applies `Theme.DeviceDefault.NoActionBar` when the
   manifest names no theme. The launch splash is drawn from the manifest before any app code
   runs, so for a dark splash set `theme = "@android:style/Theme.DeviceDefault.NoActionBar"` under
