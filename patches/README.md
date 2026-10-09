@@ -23,6 +23,23 @@ drags in every egui app.
 
 Wired via workspace `[patch.crates-io]` in the root `Cargo.toml`.
 
+## `winit` / `eframe`
+
+Vendored from crates.io `0.30.13` / `0.36.2`. Each crate's `PRIVAXY-PATCH.md` lists its edits.
+
+**Changes:**
+- winit `src/event_loop.rs`: the one-event-loop-per-process guard no longer applies on Android
+- winit `src/platform_impl/android/mod.rs`: `MainEvent::Destroy` exits the event loop
+- eframe `src/native/glow_integration.rs`: shutdown after Suspend has released the window and
+  GL context saves without a window and gives app cleanup `None`
+
+Android starts each NativeActivity on a new `android_main` thread, and a foreground service can
+keep the process alive into the next Activity. Upstream winit refuses that Activity's event loop,
+so it never renders, and NativeActivity's UI thread waits forever on a loop that ignores Destroy.
+
+Wired via workspace `[patch.crates-io]` in the root `Cargo.toml`. Apps outside this workspace
+need matching `winit` and `eframe` entries to get the fix.
+
 ## `ndk-build2` / `cargo-apk2`
 
 Vendored from crates.io `1.3.11`.

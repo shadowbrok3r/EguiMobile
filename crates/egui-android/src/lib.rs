@@ -672,12 +672,14 @@ pub enum Backend {
     Glow,
 }
 
-static GLOW_CONTEXT: std::sync::OnceLock<std::sync::Arc<glow::Context>> =
-    std::sync::OnceLock::new();
+thread_local! {
+    static GLOW_CONTEXT: std::cell::RefCell<Option<std::sync::Arc<glow::Context>>> =
+        const { std::cell::RefCell::new(None) };
+}
 
-/// The live `glow` context, once the app is running on [`Backend::Glow`]. `None` on wgpu.
+/// The live `glow` context on this Activity's render thread. `None` on wgpu or other threads.
 pub fn glow_context() -> Option<std::sync::Arc<glow::Context>> {
-    GLOW_CONTEXT.get().cloned()
+    GLOW_CONTEXT.with(|context| context.borrow().clone())
 }
 
 pub fn run_with(
@@ -739,9 +741,7 @@ pub fn run_with_depth(
         options,
         Box::new(move |cc| {
             crate::ime_bridge::set_wake_context(&cc.egui_ctx);
-            if let Some(gl) = cc.gl.clone() {
-                let _ = GLOW_CONTEXT.set(gl);
-            }
+            GLOW_CONTEXT.with(|context| *context.borrow_mut() = cc.gl.clone());
             // Install the plugin paint callback into eframe's wgpu renderer (feature `plugins`).
             #[cfg(feature = "plugins")]
             if let Some(rs) = cc.wgpu_render_state.as_ref() {

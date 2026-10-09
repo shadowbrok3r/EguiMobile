@@ -9,21 +9,23 @@
 //! wired here.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 use android_activity::AndroidApp;
 use egui_mobile_core::Host;
 use jni::JavaVM;
 use jni::objects::{JObject, JString, JValue};
 
-// AndroidApp handle for IME control and content-rect reads; set once by `run`.
-static ANDROID_APP: OnceLock<AndroidApp> = OnceLock::new();
+// The Activity may be recreated while a foreground service keeps this process alive.
+// Clone under the lock and release it before any JNI call.
+static ANDROID_APP: Mutex<Option<AndroidApp>> = Mutex::new(None);
 
 // Last keyboard state the app requested; drives the text-actions bar visibility.
 static KEYBOARD_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn set_android_app(app: AndroidApp) {
-    let _ = ANDROID_APP.set(app);
+    *ANDROID_APP.lock().unwrap() = Some(app);
+    KEYBOARD_REQUESTED.store(false, Ordering::Relaxed);
 }
 
 pub(crate) fn keyboard_requested() -> bool {
@@ -161,7 +163,7 @@ const JNI_FRAME: i32 = 16;
 pub fn with_native_activity<R>(
     f: impl FnOnce(&mut jni::JNIEnv, &JObject) -> jni::errors::Result<R>,
 ) -> Option<R> {
-    let app = ANDROID_APP.get()?;
+    let app = ANDROID_APP.lock().ok()?.clone()?;
     let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) }.ok()?;
     let mut env = vm.attach_current_thread().ok()?;
     // Unowned JNI global ref from AndroidApp — must not DeleteLocalRef on drop. Made before the
@@ -189,7 +191,7 @@ pub fn with_native_activity<R>(
 fn with_activity<R>(
     f: impl FnOnce(&mut jni::JNIEnv, &JObject) -> jni::errors::Result<R>,
 ) -> Option<R> {
-    if ANDROID_APP.get().is_some() {
+    if ANDROID_APP.lock().is_ok_and(|app| app.is_some()) {
         return with_native_activity(f);
     }
     let ctx = ndk_context::android_context();
@@ -1614,7 +1616,7 @@ fn set_soft_keyboard(show: bool) {
     if crate::ime_bridge::set_soft_keyboard(show) {
         return;
     }
-    let Some(app) = ANDROID_APP.get() else {
+    let Some(app) = ANDROID_APP.lock().ok().and_then(|app| app.clone()) else {
         log::warn!("egui-android: SetKeyboard before the AndroidApp handle is registered");
         return;
     };
@@ -1639,7 +1641,7 @@ fn keyboard_pts(host: &Host, pixels_per_point: f32) -> f32 {
     if let Some(px) = ime_inset_px() {
         return px / pixels_per_point;
     }
-    let Some(app) = ANDROID_APP.get() else { return 0.0 };
+    let Some(app) = ANDROID_APP.lock().ok().and_then(|app| app.clone()) else { return 0.0 };
     let Some(win) = app.native_window() else { return 0.0 };
     let raw = (win.height() as f32 - app.content_rect().bottom as f32).max(0.0) / pixels_per_point;
     if raw > host.safe_area_insets().bottom + 40.0 { raw } else { 0.0 }

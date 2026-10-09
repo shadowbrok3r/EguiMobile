@@ -39,6 +39,8 @@ exclude = [
     # [patch.crates-io] tables (git); nothing in this workspace builds them.
     "patches/egui-snarl",
     "patches/egui-scale",
+    "patches/winit",
+    "patches/eframe",
 ]
 # egui-android only builds for android targets (android-activity/eframe-android), so it is a
 # member (buildable via `cargo ndk -p egui-android`) but excluded from the default host build.
@@ -70,6 +72,10 @@ repository = "https://github.com/shadowbrok3r/ios-egui"
 # inherit this table from the git dependency; each carries a matching entry pointed at this repo.
 [patch.crates-io]
 android-activity = { path = "patches/android-activity" }
+# NativeActivity can be recreated in a process kept alive by a foreground service.
+winit = { path = "patches/winit" }
+# Destroy may follow Suspend, after Android has released the window and current GL context.
+eframe = { path = "patches/eframe" }
 
 [workspace.dependencies]
 egui = "0.36"
