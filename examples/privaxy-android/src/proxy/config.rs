@@ -389,8 +389,15 @@ impl Paths {
         let path = self
             .root
             .join(format!("privaxy-{}.har", at.format("%Y%m%d-%H%M%S")));
-        let har = crate::proxy::har::build(events);
-        std::fs::write(&path, serde_json::to_vec(&har)?)?;
+        use std::io::Write;
+        let mut output = std::io::BufWriter::new(std::fs::File::create(&path)?);
+        if let Err(error) =
+            crate::proxy::har::write(events, &mut output).and_then(|()| output.flush())
+        {
+            drop(output);
+            let _ = std::fs::remove_file(&path);
+            return Err(error.into());
+        }
         Ok(path)
     }
 

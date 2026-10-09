@@ -120,8 +120,9 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                 ui.label(
                     egui::RichText::new(
                         "Blocks whole hosts as connections open, and passes everything else \
-                         through untouched. Needs no certificate and works for every app on \
-                         the device.",
+                         through untouched. Installing the CA does not enable decryption. \
+                         Add selected hosts under Settings > Inspect these hosts to see their \
+                         HTTPS requests, or choose Full inspection.",
                     )
                     .size(12.0)
                     .color(ui::MUTED),
@@ -136,16 +137,16 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                     .color(ui::MUTED),
                 );
                 ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new(
-                        "Needs the Privaxy certificate installed. Even then, Android 7 and later \
-                         only lets apps that opt in trust user certificates — in practice that \
-                         means browsers. Other apps will fail to connect on hosts this mode \
-                         intercepts.",
-                    )
-                    .size(12.0)
-                    .color(ui::WARN),
-                );
+                let certificate = &loaded.certificate_check.status;
+                ui.label(egui::RichText::new(certificate.label()).size(12.0).color(
+                    if certificate.is_problem() {
+                        ui::WARN
+                    } else if *certificate == crate::certificate::CertificateStatus::Installed {
+                        ui::GOOD
+                    } else {
+                        ui::MUTED
+                    },
+                ));
             }
         }
 
@@ -158,6 +159,70 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
             }
             let _ = loaded.save();
         }
+    });
+
+    ui.add_space(10.0);
+
+    ui::card(ui, |ui| {
+        ui::section_title(ui, "Capture diagnostics");
+        let events = loaded.state.recent_events(400);
+        let mut detailed = 0;
+        let mut failed = 0;
+        let mut h2 = 0;
+        for event in &events {
+            if let Ok(exchange) = event.exchange.lock() {
+                detailed += usize::from(!exchange.is_opaque());
+                failed += usize::from(exchange.error.is_some());
+                h2 += usize::from(exchange.request_version == Some(http::Version::HTTP_2));
+            }
+        }
+        ui.label(
+            egui::RichText::new(format!(
+                "Recent log: {detailed} with headers · {failed} failed · {h2} HTTP/2"
+            ))
+            .size(12.0),
+        );
+        ui.label(
+            egui::RichText::new(
+                "CONNECT rows describe connections; decrypted requests appear separately. \
+             QUIC/HTTP/3 needs Drop QUIC enabled and a client that can fall back to TCP.",
+            )
+            .size(12.0)
+            .color(ui::MUTED),
+        );
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            for (label, kind) in [
+                ("With details", ui::requests::KindFilter::Inspectable),
+                ("Failures", ui::requests::KindFilter::Failed),
+            ] {
+                if ui.button(label).clicked() {
+                    app.request_filters = ui::requests::RequestFilters {
+                        kind,
+                        show_filters: true,
+                        ..Default::default()
+                    };
+                    app.request_query.clear();
+                    app.selected_request = None;
+                    app.tab = ui::Tab::Requests;
+                }
+            }
+        });
+        ui.add_space(6.0);
+        if ui::big_button(ui, "Open HTTPS browser test", ui::ACCENT_FILL).clicked() {
+            host.open_url(format!(
+                "https://example.com/?privaxy_check={}",
+                chrono::Utc::now().timestamp_millis()
+            ));
+        }
+        ui.label(
+            egui::RichText::new(
+                "Enable capture and inspect example.com first. After the page loads, look for its \
+             GET row in Requests. Success tests that browser, not every app's certificate trust.",
+            )
+            .size(12.0)
+            .color(ui::MUTED),
+        );
     });
 
     ui.add_space(10.0);

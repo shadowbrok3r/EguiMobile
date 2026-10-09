@@ -2,6 +2,7 @@
 //! [`ProxyHandle`] and observed through [`ProxyState`].
 
 pub mod blocker;
+mod body;
 pub mod ca;
 pub mod cert;
 pub mod config;
@@ -9,6 +10,7 @@ pub mod exclusions;
 pub mod har;
 pub mod session;
 pub mod state;
+pub mod storage;
 
 use blocker::FilterEngine;
 use cert::CertCache;
@@ -176,7 +178,13 @@ impl ProxyHandle {
     ///
     /// The filter engine is deliberately not consulted: a replay is an explicit act, and having
     /// it silently blocked by a rule the user just added would be the opposite of a debugging aid.
-    pub fn replay(&self, method: String, url: String, headers: Vec<(String, String)>, body: Vec<u8>) {
+    pub fn replay(
+        &self,
+        method: String,
+        url: String,
+        headers: Vec<(String, String)>,
+        body: storage::BodySnapshot,
+    ) {
         let Some(runtime) = self.runtime.as_ref() else {
             return;
         };
@@ -200,12 +208,29 @@ impl ProxyHandle {
                 }
                 request = request.header(name, value);
             }
-            if !body.is_empty() {
-                request = request.body(body.clone());
-            }
+            use http_body_util::BodyExt;
             if let Ok(mut open) = exchange.lock() {
                 open.request_headers = headers;
-                open.record_request_chunk(&body);
+            }
+            if body.len > 0 {
+                let stream =
+                    futures::stream::try_unfold((body, 0_u64), |(body, offset)| async move {
+                        if offset >= body.len {
+                            return Ok::<_, std::io::Error>(None);
+                        }
+                        let read = body.clone();
+                        let bytes =
+                            tokio::task::spawn_blocking(move || read.read_range(offset, 64 * 1024))
+                                .await
+                                .map_err(std::io::Error::other)??;
+                        let next = offset + bytes.len() as u64;
+                        Ok(Some((bytes::Bytes::from(bytes), (body, next))))
+                    });
+                request = request.body(reqwest::Body::wrap(body::CaptureBody::new(
+                    reqwest::Body::wrap_stream(stream),
+                    exchange.clone(),
+                    true,
+                )));
             }
 
             match request.send().await {
@@ -221,12 +246,21 @@ impl ProxyHandle {
                             )
                         })
                         .collect();
-                    let bytes = response.bytes().await.unwrap_or_default();
+                    let version = response.version();
                     if let Ok(mut open) = exchange.lock() {
                         open.status = Some(status);
                         open.response_headers = response_headers;
-                        open.record_response_chunk(&bytes);
-                        open.finished_at = Some(chrono::Local::now());
+                        open.response_version = Some(version);
+                    }
+                    let mut captured = body::CaptureBody::new(
+                        reqwest::Body::from(response),
+                        exchange.clone(),
+                        false,
+                    );
+                    while let Some(frame) = captured.frame().await {
+                        if frame.is_err() {
+                            break;
+                        }
                     }
                 }
                 Err(error) => {
@@ -503,8 +537,12 @@ fn client_tls_config() -> rustls::ClientConfig {
 /// Uses a bundled Mozilla root set rather than rustls-platform-verifier, which needs Android Java
 /// helper classes this APK does not carry and panics when uninitialized.
 fn build_client() -> reqwest::Client {
+    // Preconfigured rustls configs are used as-is by reqwest, including their ALPN list.
+    // Keep the separate raw WebSocket connector on HTTP/1.1.
+    let mut tls = client_tls_config();
+    tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     reqwest::Client::builder()
-        .use_preconfigured_tls(client_tls_config())
+        .use_preconfigured_tls(tls)
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .connect_timeout(Duration::from_secs(10))

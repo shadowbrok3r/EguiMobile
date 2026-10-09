@@ -170,6 +170,22 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
     ui::card(ui, |ui| {
         ui::section_title(ui, "Certificate authority");
         ui.add_space(6.0);
+        let certificate = &loaded.certificate_check.status;
+        ui.label(egui::RichText::new(certificate.label()).size(12.0).color(
+            if certificate.is_problem() {
+                ui::WARN
+            } else if *certificate == crate::certificate::CertificateStatus::Installed {
+                ui::GOOD
+            } else {
+                ui::MUTED
+            },
+        ));
+        ui.label(egui::RichText::new("Installation is checked for this Android profile. Each client app still chooses which CAs it trusts; actual rejections appear in Requests > Failed.").size(12.0).color(ui::MUTED));
+        if ui.button("Check certificate again").clicked() {
+            loaded.certificate_check.invalidate();
+            loaded.certificate_check.update(&loaded.config.ca);
+        }
+        ui.add_space(6.0);
         ui.label(
             egui::RichText::new(
                 "Only needed for full inspection. Android will not let an app install a CA \
@@ -233,6 +249,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
             match CertAuthority::generate() {
                 Ok(authority) => {
                     loaded.config.ca = authority;
+                    loaded.certificate_check.update(&loaded.config.ca);
                     let _ = loaded.save();
                     let _ = loaded.paths.export_ca(&loaded.config);
                     loaded.restart_proxy();

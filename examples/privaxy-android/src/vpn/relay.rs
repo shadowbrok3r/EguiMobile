@@ -210,11 +210,13 @@ async fn read_client_hello(tcp: &mut IpStackTcpStream) -> std::io::Result<Vec<u8
         if !sniff::looks_like_client_hello(&head) || head.len() >= sniff::MAX_HELLO {
             return Ok(head);
         }
-        if sniff::server_name(&head).is_some() {
+        // A complete hello without SNI (IP literals, for example) needs no extra timeout.
+        if sniff::client_hello_complete(&head) {
             return Ok(head);
         }
 
-        let read = tokio::time::timeout_at(deadline, tcp.read(&mut chunk)).await;
+        let room = chunk.len().min(sniff::MAX_HELLO - head.len());
+        let read = tokio::time::timeout_at(deadline, tcp.read(&mut chunk[..room])).await;
         match read {
             Ok(Ok(0)) => return Ok(head),
             Ok(Ok(count)) => head.extend_from_slice(&chunk[..count]),

@@ -12,6 +12,12 @@ use std::sync::Arc;
 /// so there is no tunnel overhead to leave room for.
 const TUN_MTU: u16 = 1500;
 
+// NativeActivity is a UI lifetime, not the lifetime of the proxy's foreground service.
+// Each UI borrows the backend for one callback. Android can start the replacement Activity
+// before destroying the previous one, so ownership must never wait for the old UI to drop.
+#[cfg(target_os = "android")]
+static BACKGROUND: std::sync::Mutex<Option<Loaded>> = std::sync::Mutex::new(None);
+
 /// Everything that only exists once storage has been located and the configuration read.
 pub struct Loaded {
     pub paths: Paths,
@@ -19,6 +25,7 @@ pub struct Loaded {
     pub state: Arc<ProxyState>,
     pub proxy: Option<ProxyHandle>,
     pub vpn: VpnController,
+    pub certificate_check: crate::certificate::CertificateCheck,
 }
 
 impl Loaded {
@@ -218,12 +225,14 @@ pub struct PrivaxyApp {
     pub request_query: String,
     pub block_domain_text: String,
     pub request_filters: ui::requests::RequestFilters,
+    pub request_view: ui::requests::RequestView,
     /// The logged exchange the inspector is open on, if any.
     pub selected_request: Option<u64>,
     pub inspect_tab: ui::inspect::InspectTab,
     /// Wrap headers and bodies, or let them run and scroll sideways.
     pub inspect_wrap: bool,
-    pub inspect_json: ui::inspect::JsonCache,
+    pub inspect_body: ui::inspect::BodyCache,
+    file_job: Option<std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>>,
     pub notice: Option<String>,
     /// Filter subscriptions changed but the engine has not been rebuilt yet.
     pub filters_dirty: bool,
@@ -232,6 +241,61 @@ pub struct PrivaxyApp {
 }
 
 impl PrivaxyApp {
+    /// Serialize Activity callbacks while the proxy's async workers keep running independently.
+    fn with_backend(&mut self, action: impl FnOnce(&mut Self)) {
+        #[cfg(target_os = "android")]
+        {
+            let mut backend = BACKGROUND.lock().unwrap();
+            self.loaded = backend.take();
+            action(self);
+            *backend = self.loaded.take();
+        }
+        #[cfg(not(target_os = "android"))]
+        action(self);
+    }
+
+    pub fn save_file(
+        &mut self,
+        job: impl FnOnce() -> Result<std::path::PathBuf, String> + Send + 'static,
+    ) {
+        if self.file_job.is_some() {
+            self.notice = Some("An export is already running.".into());
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.file_job = Some(rx);
+        self.notice = Some("Saving capture data…".into());
+        std::thread::spawn(move || {
+            let _ = tx.send(job());
+        });
+    }
+
+    fn poll_file_job(&mut self, host: &Host) {
+        let result = self.file_job.as_ref().map(|rx| rx.try_recv());
+        let result = match result {
+            Some(Ok(result)) => result,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                Err("Export worker stopped unexpectedly.".into())
+            }
+            _ => return,
+        };
+        self.file_job = None;
+        match result {
+            Ok(path) => {
+                self.notice = Some(format!(
+                    "Saved {} to Downloads.",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                ));
+                host.share_file(path.to_string_lossy().into_owned());
+                host.haptic(Haptic::Success);
+            }
+            Err(error) => {
+                self.notice = Some(format!("Could not save: {error}"));
+                host.haptic(Haptic::Error);
+            }
+        }
+    }
+
     pub fn new(_cc: &CreateContext) -> Self {
         Self {
             loaded: None,
@@ -245,10 +309,12 @@ impl PrivaxyApp {
             request_query: String::new(),
             block_domain_text: String::new(),
             request_filters: ui::requests::RequestFilters::default(),
+            request_view: ui::requests::RequestView::default(),
             selected_request: None,
             inspect_tab: ui::inspect::InspectTab::Overview,
             inspect_wrap: true,
-            inspect_json: ui::inspect::JsonCache::default(),
+            inspect_body: ui::inspect::BodyCache::default(),
+            file_job: None,
             notice: None,
             filters_dirty: false,
             notifications_asked: false,
@@ -274,7 +340,16 @@ impl PrivaxyApp {
                 self.request_filters = config.request_filters.clone();
                 self.inspect_wrap = config.inspect_wrap;
 
-                let state = Arc::new(ProxyState::new(config.mode));
+                let state =
+                    match ProxyState::with_storage(config.mode, &paths.root.join("capture-bodies"))
+                    {
+                        Ok(state) => Arc::new(state),
+                        Err(error) => {
+                            self.init_error =
+                                Some(format!("Could not open capture storage: {error}"));
+                            return;
+                        }
+                    };
                 let start_now = config.start_on_launch;
                 let capture_now = config.capture_all;
                 let mut loaded = Loaded {
@@ -283,6 +358,7 @@ impl PrivaxyApp {
                     state,
                     proxy: None,
                     vpn: VpnController::new(),
+                    certificate_check: crate::certificate::CertificateCheck::default(),
                 };
                 if start_now {
                     loaded.start_proxy();
@@ -299,7 +375,7 @@ impl PrivaxyApp {
         }
     }
 
-    fn header(&mut self, ui: &mut egui::Ui) {
+    fn header(&mut self, ui: &mut egui::Ui, host: &Host) {
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new("Privaxy")
@@ -309,11 +385,42 @@ impl PrivaxyApp {
             );
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let (text, color) = match self.loaded.as_ref().map(|loaded| loaded.state.status()) {
-                    Some(Status::Running { .. }) => ("• Running", ui::GOOD),
-                    Some(Status::Starting) => ("• Starting", ui::WARN),
-                    Some(Status::Failed(_)) => ("• Failed", ui::BAD),
-                    _ => ("• Stopped", ui::MUTED),
+                let Some(loaded) = self.loaded.as_mut() else {
+                    return;
+                };
+                let capturing = loaded.vpn.status().is_on();
+                let (icon, label) = if capturing {
+                    (ui::icons::Icon::Pause, "Stop capturing traffic")
+                } else {
+                    (ui::icons::Icon::Play, "Start capturing traffic")
+                };
+                if ui
+                    .add_enabled_ui(loaded.vpn.is_supported(), |ui| {
+                        ui::icons::button(ui, icon, label, capturing, 32.0)
+                    })
+                    .inner
+                    .clicked()
+                {
+                    if capturing {
+                        loaded.stop_capture();
+                    } else {
+                        loaded.start_capture();
+                    }
+                    loaded.config.capture_all = !capturing;
+                    let _ = loaded.save();
+                    host.haptic(Haptic::Light);
+                }
+                let (text, color) = match loaded.vpn.status() {
+                    crate::vpn::VpnStatus::Running => ("• Capturing", ui::GOOD),
+                    crate::vpn::VpnStatus::Requesting => ("• Permission", ui::WARN),
+                    crate::vpn::VpnStatus::Starting => ("• Starting", ui::WARN),
+                    crate::vpn::VpnStatus::Failed(_) => ("• Capture failed", ui::BAD),
+                    crate::vpn::VpnStatus::Off => match loaded.state.status() {
+                        Status::Running { .. } => ("• Proxy only", ui::MUTED),
+                        Status::Starting => ("• Starting", ui::WARN),
+                        Status::Failed(_) => ("• Failed", ui::BAD),
+                        Status::Stopped => ("• Stopped", ui::MUTED),
+                    },
                 };
                 ui.label(egui::RichText::new(text).size(12.0).color(color));
             });
@@ -354,18 +461,46 @@ impl EguiApp for PrivaxyApp {
     }
 
     fn on_start(&mut self, _ctx: &egui::Context, host: &Host) {
-        self.ensure_loaded(host);
+        ui::frost::invalidate();
+        self.with_backend(|app| {
+            app.ensure_loaded(host);
+            if let Some(loaded) = app.loaded.as_mut() {
+                app.port_text = loaded.config.listen_port.to_string();
+                app.vpn_dns_text = loaded.config.vpn_dns.clone();
+                app.request_filters = loaded.config.request_filters.clone();
+                app.inspect_wrap = loaded.config.inspect_wrap;
+                loaded.certificate_check.invalidate();
+            }
+        });
     }
 
     fn on_pause(&mut self, _host: &Host) {
         // The proxy is deliberately left running: backgrounding the app should not drop every
         // tunnel. Android may still reclaim the process — see the note on the dashboard.
-        if let Some(loaded) = self.loaded.as_ref() {
-            let _ = loaded.save();
-        }
+        self.with_backend(|app| {
+            if let Some(loaded) = app.loaded.as_ref() {
+                let _ = loaded.save();
+            }
+        });
+    }
+
+    fn on_resume(&mut self, _host: &Host) {
+        ui::frost::invalidate();
+        self.with_backend(|app| {
+            if let Some(loaded) = app.loaded.as_mut() {
+                loaded.certificate_check.invalidate();
+            }
+        });
     }
 
     fn update(&mut self, ui: &mut egui::Ui, host: &Host) {
+        self.with_backend(|app| app.update_screen(ui, host));
+    }
+}
+
+impl PrivaxyApp {
+    fn update_screen(&mut self, ui: &mut egui::Ui, host: &Host) {
+        self.poll_file_job(host);
         // Redundant since egui-android's `run_with` started calling `EguiApp::theme` before the
         // first frame; kept because it is idempotent and the backdrop below has to run per frame.
         ui::apply_theme(ui.ctx());
@@ -378,6 +513,7 @@ impl EguiApp for PrivaxyApp {
 
         // The consent dialog's answer and the VPN service's callbacks both arrive on Java threads.
         if let Some(loaded) = self.loaded.as_mut() {
+            loaded.certificate_check.update(&loaded.config.ca);
             if loaded.vpn.poll() {
                 // Revoking the VPN in Settings stops the service outright, notification included,
                 // so a proxy that is still listening has to claim the foreground again.
@@ -400,7 +536,7 @@ impl EguiApp for PrivaxyApp {
         // to the list underneath it.
         let top = egui::Panel::top("header")
             .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 3)))
-            .show(ui, |ui| self.header(ui))
+            .show(ui, |ui| self.header(ui, host))
             .response
             .rect;
 
@@ -462,8 +598,12 @@ impl EguiApp for PrivaxyApp {
                 // scroller. Its own panes scroll, and a scroll area nested in another captures the
                 // entire touch drag from first contact — once the inner one hits its end the page
                 // is frozen until the finger lifts, because drag scrolling never chains to a parent.
-                if self.tab == Tab::Requests && self.selected_request.is_some() {
-                    ui::inspect::show(self, ui, host);
+                if self.tab == Tab::Requests {
+                    if self.selected_request.is_some() {
+                        ui::inspect::show(self, ui, host);
+                    } else {
+                        ui::requests::show(self, ui, host);
+                    }
                     return;
                 }
 
@@ -478,7 +618,7 @@ impl EguiApp for PrivaxyApp {
                     })
                     .show(ui, |ui| match self.tab {
                         Tab::Dashboard => ui::dashboard::show(self, ui, host),
-                        Tab::Requests => ui::requests::show(self, ui, host),
+                        Tab::Requests => unreachable!(),
                         Tab::Filters => ui::filters::show(self, ui, host),
                         Tab::Settings => ui::settings::show(self, ui, host),
                     });

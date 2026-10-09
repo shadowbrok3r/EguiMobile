@@ -4,6 +4,7 @@ pub mod chips;
 pub mod dashboard;
 pub mod filters;
 pub mod frost;
+pub mod icons;
 pub mod inspect;
 pub mod requests;
 pub mod settings;

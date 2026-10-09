@@ -1,21 +1,18 @@
 //! State shared between the proxy's Tokio threads and the egui frame loop.
 //!
 //! The UI reads this every frame, so nothing here may block for long: counters are atomics and the
-//! request log is a bounded ring buffer behind a short-lived lock.
+//! request log contains bounded metadata behind a short-lived lock; payloads live in files.
 
 use crate::proxy::config::MitmMode;
 use chrono::{DateTime, Local};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-const MAX_LOGGED_REQUESTS: usize = 400;
-/// Entries that keep their bodies. Older ones stay in the log as headers and timings only —
-/// otherwise a few video responses would own the app's whole heap.
-const MAX_DETAILED_REQUESTS: usize = 60;
-/// Kept per body. Enough for a document, a JSON payload or a beacon; a media stream is truncated.
-const MAX_BODY_BYTES: usize = 64 * 1024;
+pub use super::storage::Body;
+use super::storage::{BodyStore, CAPTURE_BUDGET};
 
+pub const MAX_LOGGED_REQUESTS: usize = 5000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
     Stopped,
@@ -43,74 +40,54 @@ pub enum EventKind {
     Blocked { filter: String },
     /// Passed through byte for byte: hostname-only mode, or a never-intercept host.
     Tunneled,
-    /// TLS was terminated, so the requests inside are logged separately as [`EventKind::Proxied`].
-    /// A row with nothing under it means the client rejected the certificate.
+    /// TLS interception was attempted; consult the exchange for its outcome.
     Intercepted,
     Proxied,
 }
 
-/// The prefix of a body kept for inspection, and how much went past it.
-#[derive(Debug, Default, Clone)]
-pub struct Body {
-    pub bytes: Vec<u8>,
-    /// Total bytes seen, kept or not.
-    pub seen: u64,
-    /// The prefix was dropped to keep the log bounded; `seen` still stands.
-    pub evicted: bool,
-}
-
-impl Body {
-    fn push(&mut self, chunk: &[u8]) {
-        self.seen += chunk.len() as u64;
-        if self.evicted {
-            return;
-        }
-        let room = MAX_BODY_BYTES.saturating_sub(self.bytes.len());
-        if room > 0 {
-            self.bytes.extend_from_slice(&chunk[..room.min(chunk.len())]);
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.seen == 0
-    }
-
-    /// More was sent than was kept.
-    pub fn truncated(&self) -> bool {
-        self.seen > self.bytes.len() as u64
-    }
-}
-
 /// Everything the proxy saw of one exchange, filled in as it happens rather than at the end, so
 /// the UI can open a request that is still streaming.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Exchange {
     pub request_headers: Vec<(String, String)>,
     pub response_headers: Vec<(String, String)>,
+    pub request_trailers: Vec<(String, String)>,
+    pub response_trailers: Vec<(String, String)>,
+    pub request_version: Option<http::Version>,
+    pub response_version: Option<http::Version>,
     pub status: Option<u16>,
     pub request_body: Body,
     pub response_body: Body,
-    /// Last time a response byte arrived; with [`RequestEvent::at`] this is the duration.
+    /// When the response completed or failed; absent while still streaming.
     pub finished_at: Option<DateTime<Local>>,
     /// Why there is nothing to inspect, for the entries where there is nothing.
     pub note: Option<String>,
+    /// A transport/protocol failure, distinct from an opaque but working tunnel.
+    pub error: Option<String>,
 }
 
 impl Exchange {
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        let store = BodyStore::temporary(CAPTURE_BUDGET);
+        Self {
+            request_body: store.body(),
+            response_body: store.body(),
+            ..Self::default()
+        }
+    }
+
     pub fn record_request_chunk(&mut self, chunk: &[u8]) {
         self.request_body.push(chunk);
     }
 
     pub fn record_response_chunk(&mut self, chunk: &[u8]) {
         self.response_body.push(chunk);
-        self.finished_at = Some(Local::now());
     }
 
-    fn evict_bodies(&mut self) {
-        self.request_body.bytes = Vec::new();
-        self.request_body.evicted = true;
-        self.response_body.bytes = Vec::new();
-        self.response_body.evicted = true;
+    pub fn fail(&mut self, message: impl Into<String>) {
+        self.error = Some(message.into());
+        self.finished_at = Some(Local::now());
     }
 
     /// Whether anything beyond the request line was ever visible.
@@ -210,16 +187,42 @@ pub struct ProxyState {
     next_id: AtomicU64,
     mode: AtomicU8,
     paused: AtomicBool,
+    storage: Mutex<BodyStore>,
     pub counters: Counters,
 }
 
 impl ProxyState {
+    #[cfg(test)]
     pub fn new(mode: MitmMode) -> Self {
+        Self::with_store(mode, BodyStore::temporary(CAPTURE_BUDGET))
+    }
+
+    pub fn with_storage(mode: MitmMode, root: &std::path::Path) -> std::io::Result<Self> {
+        // Removing thousands of old files must not stall the first UI frame. Snapshot only the
+        // previous session directories; the cleaner must never race a new capture's creation.
+        let old: Vec<_> = std::fs::read_dir(root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("session-"))
+            .map(|entry| entry.path())
+            .collect();
+        let storage = BodyStore::new(root, CAPTURE_BUDGET)?;
+        std::thread::spawn(move || {
+            for path in old {
+                let _ = std::fs::remove_dir_all(path);
+            }
+        });
+        Ok(Self::with_store(mode, storage))
+    }
+
+    fn with_store(mode: MitmMode, storage: BodyStore) -> Self {
         Self {
             status: Mutex::new(Status::Stopped),
             filters: Mutex::new(FiltersStatus::Idle),
             events: Mutex::new(VecDeque::with_capacity(MAX_LOGGED_REQUESTS)),
             paused: AtomicBool::new(false),
+            storage: Mutex::new(storage),
             next_id: AtomicU64::new(1),
             mode: AtomicU8::new(mode as u8),
             counters: Counters::default(),
@@ -266,10 +269,9 @@ impl ProxyState {
     /// Log an exchange and hand back its [`Exchange`], which the handler keeps writing into as
     /// headers arrive and the body streams.
     /// Whether new exchanges are being added to the log. Traffic still flows when paused; it is
-    /// only the log that holds still, which is what stops the ring turning over and bodies being
-    /// evicted while an exchange is being read.
+    /// only the log that holds still. Previously recorded bodies remain available.
     pub fn paused(&self) -> bool {
-        self.paused.load(Ordering::Relaxed)
+        self.paused.load(Ordering::Relaxed) || self.storage_problem().is_some()
     }
 
     pub fn set_paused(&self, paused: bool) {
@@ -283,35 +285,46 @@ impl ProxyState {
             return event.exchange.clone();
         }
 
+        let mut events = self.events.lock().unwrap();
+        let storage = self.storage.lock().unwrap();
+        if storage.problem().is_some() {
+            return event.exchange.clone();
+        }
+        if events.len() == MAX_LOGGED_REQUESTS {
+            storage.stop(format!("Capture reached {MAX_LOGGED_REQUESTS} entries. Save the capture, then clear it to record more. Existing requests and bodies are preserved."));
+            return event.exchange.clone();
+        }
         match &event.kind {
             EventKind::Blocked { .. } => self.counters.blocked.fetch_add(1, Ordering::Relaxed),
-            // Both are a CONNECT that opened rather than a request that was forwarded.
             EventKind::Tunneled | EventKind::Intercepted => {
                 self.counters.tunneled.fetch_add(1, Ordering::Relaxed)
             }
             EventKind::Proxied => self.counters.proxied.fetch_add(1, Ordering::Relaxed),
         };
-
         event.id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let exchange = event.exchange.clone();
-
-        if let Ok(mut events) = self.events.lock() {
-            if events.len() == MAX_LOGGED_REQUESTS {
-                events.pop_back();
-            }
-            events.push_front(event);
-            // Exactly one entry crosses the detail boundary per push, so this stays O(1).
-            if let Some(aged_out) = events.get(MAX_DETAILED_REQUESTS) {
-                if let Ok(mut aged_out) = aged_out.exchange.lock() {
-                    aged_out.evict_bodies();
-                }
-            }
+        if let Ok(mut open) = exchange.lock() {
+            open.request_body = storage.body();
+            open.response_body = storage.body();
         }
+        events.push_front(event);
 
         exchange
     }
 
-    /// The logged exchange with this id, if it has not aged out.
+    pub fn latest_id(&self) -> u64 {
+        self.next_id.load(Ordering::Relaxed).saturating_sub(1)
+    }
+
+    pub fn storage_problem(&self) -> Option<String> {
+        self.storage.lock().unwrap().problem()
+    }
+
+    pub fn stored_bytes(&self) -> u64 {
+        self.storage.lock().unwrap().used()
+    }
+
+    /// The logged exchange with this id.
     pub fn event(&self, id: u64) -> Option<RequestEvent> {
         self.events
             .lock()
@@ -335,7 +348,17 @@ impl ProxyState {
 
     pub fn clear_events(&self) {
         if let Ok(mut events) = self.events.lock() {
-            events.clear();
+            let mut storage = self.storage.lock().unwrap();
+            match storage.reset() {
+                Ok(next) => {
+                    events.clear();
+                    *storage = next;
+                }
+                Err(error) => {
+                    storage.stop(format!("Could not clear capture storage: {error}"));
+                    return;
+                }
+            }
         }
         // The dashboard tiles count what the log holds, so leaving them running would describe
         // requests that no longer exist anywhere in the app.
@@ -382,29 +405,55 @@ mod tests {
     }
 
     #[test]
-    fn bodies_keep_a_prefix_and_count_the_rest() {
-        let mut body = Body::default();
-        body.push(&vec![b'a'; MAX_BODY_BYTES - 1]);
-        body.push(b"bb");
-        assert_eq!(body.bytes.len(), MAX_BODY_BYTES);
-        assert_eq!(body.seen, MAX_BODY_BYTES as u64 + 1);
-        assert!(body.truncated());
+    fn older_bodies_survive_rapid_traffic_and_large_payloads() {
+        let state = ProxyState::new(MitmMode::Full);
+        let first = state.record(event("https://example.com/first"));
+        let payload = vec![b'x'; 2 * 1024 * 1024];
+        first.lock().unwrap().record_response_chunk(&payload);
+        for index in 0..800 {
+            state.record(event(&format!("https://example.com/{index}")));
+        }
+        let body = state
+            .event(1)
+            .unwrap()
+            .exchange
+            .lock()
+            .unwrap()
+            .response_body
+            .snapshot();
+        assert_eq!(body.len, payload.len() as u64);
+        assert_eq!(body.read_range(0, payload.len()).unwrap(), payload);
+        assert_eq!(state.stored_bytes(), payload.len() as u64);
     }
 
     #[test]
-    fn eviction_drops_the_prefix_but_keeps_the_size() {
-        let state = ProxyState::new(MitmMode::HostnameOnly);
-        let first = state.record(event("https://example.com/first"));
-        first.lock().unwrap().record_response_chunk(b"hello");
-
-        for index in 0..MAX_DETAILED_REQUESTS {
-            state.record(event(&format!("https://example.com/{index}")));
+    fn entry_limit_pauses_instead_of_evicting_and_clear_allows_a_new_capture() {
+        let state = ProxyState::new(MitmMode::Full);
+        for _ in 0..MAX_LOGGED_REQUESTS + 1 {
+            state.record(event("https://example.com/"));
         }
+        assert!(state.paused());
+        assert!(state.event(1).is_some());
+        assert_eq!(state.recent_events(usize::MAX).len(), MAX_LOGGED_REQUESTS);
+        state.clear_events();
+        assert!(!state.paused());
+        assert!(state.recent_events(1).is_empty());
+        let exchange = state.record(event("https://example.com/new"));
+        exchange.lock().unwrap().record_response_chunk(b"new body");
+        assert_eq!(state.stored_bytes(), 8);
+    }
 
-        let body = &first.lock().unwrap().response_body;
-        assert!(body.evicted);
-        assert!(body.bytes.is_empty());
-        assert_eq!(body.seen, 5);
+    #[test]
+    fn paused_exchanges_never_store_bodies() {
+        let state = ProxyState::new(MitmMode::Full);
+        state.set_paused(true);
+        let exchange = state.record(event("https://example.com/"));
+        exchange
+            .lock()
+            .unwrap()
+            .record_response_chunk(b"not recorded");
+        assert_eq!(state.stored_bytes(), 0);
+        assert!(state.recent_events(1).is_empty());
     }
 
     #[test]

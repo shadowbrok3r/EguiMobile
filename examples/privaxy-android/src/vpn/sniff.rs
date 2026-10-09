@@ -12,7 +12,7 @@ pub const TLS_PORTS: [u16; 2] = [443, 8443];
 
 /// Bytes to hold while looking for a ClientHello. A hello runs past one segment once it carries a
 /// post-quantum key share, but not past this.
-pub const MAX_HELLO: usize = 8192;
+pub const MAX_HELLO: usize = 64 * 1024;
 
 /// How far into `data` a ClientHello could still be completed, or `None` if these bytes cannot be
 /// the start of one.
@@ -34,21 +34,8 @@ pub fn looks_like_client_hello(data: &[u8]) -> bool {
 /// reading until [`MAX_HELLO`] or its deadline. Hostnames are lowercased, and a trailing root dot
 /// is dropped, so they compare against filter rules the way the proxy's own hosts do.
 pub fn server_name(data: &[u8]) -> Option<String> {
-    let mut reader = Reader::new(data);
-
-    if reader.u8()? != 0x16 {
-        return None;
-    }
-    reader.skip(2)?; // Record version.
-    let record_len = reader.u16()? as usize;
-    // The hello has to be whole: a truncated extension list reads as "no SNI" rather than "wait".
-    let mut body = Reader::new(reader.take(record_len)?);
-
-    if body.u8()? != 0x01 {
-        return None;
-    }
-    let handshake_len = body.u24()?;
-    let mut hello = Reader::new(body.take(handshake_len)?);
+    let handshake = client_hello(data)?;
+    let mut hello = Reader::new(&handshake[4..]);
 
     hello.skip(2)?; // client_version
     hello.skip(32)?; // random
@@ -86,6 +73,42 @@ pub fn server_name(data: &[u8]) -> Option<String> {
     }
 
     None
+}
+
+/// A complete ClientHello can span several TLS records as well as several TCP reads.
+/// Reassemble only the bounded handshake; the relay forwards the original wire bytes unchanged.
+fn client_hello(data: &[u8]) -> Option<Vec<u8>> {
+    let mut records = Reader::new(data);
+    let mut handshake = Vec::new();
+    while !records.is_empty() {
+        if records.u8()? != 0x16 || records.u8()? != 0x03 {
+            return None;
+        }
+        records.skip(1)?;
+        let len = records.u16()? as usize;
+        if len == 0 || handshake.len().checked_add(len)? > MAX_HELLO {
+            return None;
+        }
+        handshake.extend_from_slice(records.take(len)?);
+        if handshake.first() != Some(&0x01) {
+            return None;
+        }
+        if handshake.len() >= 4 {
+            let size = Reader::new(&handshake[1..]).u24()?.checked_add(4)?;
+            if size > MAX_HELLO {
+                return None;
+            }
+            if handshake.len() >= size {
+                handshake.truncate(size);
+                return Some(handshake);
+            }
+        }
+    }
+    None
+}
+
+pub fn client_hello_complete(data: &[u8]) -> bool {
+    client_hello(data).is_some()
 }
 
 /// Lowercased, with the root label's trailing dot removed.
@@ -217,5 +240,23 @@ mod tests {
         // 0x000a is supported_groups; the walk has to step over it and run out of extensions.
         let hello = client_hello_with_extension("example.com", 0x000a);
         assert_eq!(server_name(&hello), None);
+        assert!(client_hello_complete(&hello));
+    }
+
+    #[test]
+    fn reads_sni_split_across_tls_records_and_tcp_reads() {
+        let hello = client_hello("api.example.com");
+        let handshake = &hello[5..];
+        // Includes fragmentation inside the handshake's own length header.
+        for split in 1..handshake.len() {
+            let mut fragmented = Vec::new();
+            for part in [&handshake[..split], &handshake[split..]] {
+                fragmented.extend([0x16, 0x03, 0x03]);
+                fragmented.extend((part.len() as u16).to_be_bytes());
+                fragmented.extend(part);
+            }
+            assert!(!client_hello_complete(&fragmented[..fragmented.len() - 1]));
+            assert_eq!(server_name(&fragmented).as_deref(), Some("api.example.com"));
+        }
     }
 }

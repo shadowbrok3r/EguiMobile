@@ -5,6 +5,7 @@
 //! app's private storage, and a hostname-only mode added for the Android certificate trust rules.
 
 pub mod app;
+pub mod certificate;
 pub mod proxy;
 pub mod ui;
 pub mod vpn;

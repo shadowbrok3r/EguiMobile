@@ -2,7 +2,7 @@
 name = "privaxy_android"
 # Android versionCode is derived from this: (1<<24)|(major<<16)|(minor<<8)|patch.
 # Bump before every release build — the phone only offers an update whose code is strictly greater.
-version = "0.5.1"
+version = "0.5.4"
 edition = "2024"
 publish = false
 
@@ -19,7 +19,7 @@ egui_json_tree = { path = "../../patches/egui-json-tree", features = ["serde_jso
 
 
 # Proxy core.
-hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper = { version = "1", features = ["server", "client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http = "1"
 http-body-util = "0.1"
@@ -48,6 +48,7 @@ reqwest = { version = "0.13", default-features = false, features = [
     "deflate",
     "json",
     "stream",
+    "http2",
 ] }
 webpki-roots = "1"
 
@@ -81,6 +82,8 @@ log = "0.4"
 # github.com/abdu-benayad/backdrop-blur bumped to egui 0.36 — see patches/backdrop-blur. Only the
 # glow path exists, which is why this app runs on Backend::Glow.
 [target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"
 backdrop-blur-egui = { path = "../../patches/backdrop-blur/crates/backdrop-blur-egui", default-features = false, features = [
     "grab-pass",
 ] }

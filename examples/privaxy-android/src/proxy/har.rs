@@ -4,12 +4,13 @@
 //! number — `-1` is the spec's "unknown", which is what most of these are: the proxy sees a
 //! request and a response, not a connect/DNS/SSL breakdown.
 //!
-//! Bodies are the prefix the log retained, so `content.size` (everything that went past) is
-//! routinely larger than `content.text` (what was kept). That mismatch is spec-legal and is what
-//! `comment` records.
+//! Bodies are streamed from their private capture files. Export memory stays bounded even when
+//! the session contains hundreds of megabytes of payloads.
 
-use crate::proxy::state::{Body, EventKind, RequestEvent};
+use crate::proxy::state::{EventKind, RequestEvent};
+use crate::proxy::storage::BodySnapshot;
 use serde::Serialize;
+use std::io::{self, Read, Write};
 
 #[derive(Serialize)]
 pub struct Har {
@@ -50,6 +51,8 @@ pub struct Request {
     pub http_version: &'static str,
     pub cookies: Vec<()>,
     pub headers: Vec<Header>,
+    #[serde(rename = "_trailers", skip_serializing_if = "Vec::is_empty")]
+    pub trailers: Vec<Header>,
     #[serde(rename = "queryString")]
     pub query_string: Vec<Header>,
     #[serde(rename = "headersSize")]
@@ -69,6 +72,8 @@ pub struct Response {
     pub http_version: &'static str,
     pub cookies: Vec<()>,
     pub headers: Vec<Header>,
+    #[serde(rename = "_trailers", skip_serializing_if = "Vec::is_empty")]
+    pub trailers: Vec<Header>,
     pub content: Content,
     #[serde(rename = "redirectURL")]
     pub redirect_url: String,
@@ -90,7 +95,7 @@ pub struct Content {
     #[serde(rename = "mimeType")]
     pub mime_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
+    pub text: Option<BodyText>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encoding: Option<&'static str>,
 }
@@ -99,7 +104,9 @@ pub struct Content {
 pub struct PostData {
     #[serde(rename = "mimeType")]
     pub mime_type: String,
-    pub text: String,
+    pub text: BodyText,
+    #[serde(rename = "_encoding", skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -116,6 +123,7 @@ pub struct Timings {
     pub ssl: f64,
 }
 
+#[cfg(test)]
 pub fn build(events: &[RequestEvent]) -> Har {
     Har {
         log: Log {
@@ -125,14 +133,38 @@ pub fn build(events: &[RequestEvent]) -> Har {
                 version: env!("CARGO_PKG_VERSION"),
             },
             // Oldest first: the log is newest-first, and a waterfall reads forwards.
-            entries: events.iter().rev().map(entry).collect(),
+            entries: events
+                .iter()
+                .rev()
+                .map(|event| entry(event).unwrap())
+                .collect(),
         },
     }
 }
 
-fn entry(event: &RequestEvent) -> Entry {
-    let exchange = event.exchange.lock().ok();
-    let exchange = exchange.as_deref();
+pub fn write(events: &[RequestEvent], mut output: impl Write) -> io::Result<()> {
+    output.write_all(b"{\"log\":{\"version\":\"1.2\",\"creator\":")?;
+    serde_json::to_writer(
+        &mut output,
+        &Creator {
+            name: "Privaxy for Android",
+            version: env!("CARGO_PKG_VERSION"),
+        },
+    )?;
+    output.write_all(b",\"entries\":[")?;
+    for (index, event) in events.iter().rev().enumerate() {
+        if index > 0 {
+            output.write_all(b",")?;
+        }
+        serde_json::to_writer(&mut output, &entry(event)?)?;
+    }
+    output.write_all(b"]}}")
+}
+
+fn entry(event: &RequestEvent) -> io::Result<Entry> {
+    // Never hold the exchange lock during disk I/O or serialization.
+    let exchange = event.exchange.lock().ok().map(|open| open.clone());
+    let exchange = exchange.as_ref();
 
     let millis = exchange
         .and_then(|exchange| exchange.finished_at)
@@ -149,54 +181,72 @@ fn entry(event: &RequestEvent) -> Entry {
     // A blocked or tunnelled entry has no status. Chrome writes 0 for a request that produced no
     // response, so the importer is happy with it and the waterfall still renders.
     let status = exchange.and_then(|e| e.status).unwrap_or(0);
-    let status_text = match &event.kind {
-        EventKind::Blocked { filter } => format!("Blocked by Privaxy ({filter})"),
-        EventKind::Tunneled if status == 0 => String::from("Tunneled, not inspected"),
-        EventKind::Intercepted if status == 0 => {
-            String::from("TLS connection opened; requests inside are separate entries")
+    let status_text = if let Some(error) = exchange.and_then(|e| e.error.as_ref()) {
+        error.clone()
+    } else {
+        match &event.kind {
+            EventKind::Blocked { filter } => format!("Blocked by Privaxy ({filter})"),
+            EventKind::Tunneled if status == 0 => String::from("Tunneled, not inspected"),
+            EventKind::Intercepted if status == 0 => {
+                String::from("TLS connection opened; requests inside are separate entries")
+            }
+            _ => String::new(),
         }
-        _ => String::new(),
     };
 
-    let response_body = exchange.map(|e| &e.response_body);
-    let request_body = exchange.map(|e| &e.request_body);
+    let response_body = exchange.map(|e| e.response_body.snapshot());
+    let request_body = exchange.map(|e| e.request_body.snapshot());
 
-    Entry {
-        started_date_time: event.at.to_rfc3339_opts(chrono::SecondsFormat::Millis, false),
+    Ok(Entry {
+        started_date_time: event
+            .at
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, false),
         time: millis,
         request: Request {
             method: event.method.clone(),
             url: event.url.clone(),
-            http_version: "HTTP/1.1",
+            http_version: version(exchange.and_then(|e| e.request_version)),
             cookies: Vec::new(),
             headers: request_headers,
+            trailers: exchange
+                .map(|e| headers(&e.request_trailers))
+                .unwrap_or_default(),
             query_string: query_string(&event.url),
             headers_size: -1,
-            body_size: request_body.map(|b| b.seen as i64).unwrap_or(-1),
-            post_data: request_body.and_then(|body| {
-                let text = String::from_utf8(body.bytes.clone()).ok()?;
-                (!text.is_empty()).then(|| PostData {
-                    mime_type: header_value(
-                        exchange.map(|e| e.request_headers.as_slice()).unwrap_or(&[]),
-                        "content-type",
-                    )
-                    .unwrap_or_else(|| String::from("application/octet-stream")),
-                    text,
-                })
-            }),
+            body_size: request_body.as_ref().map(|b| b.seen as i64).unwrap_or(-1),
+            post_data: match request_body.as_ref().filter(|b| b.len > 0) {
+                Some(body) => {
+                    let text = BodyText::new(body.clone())?;
+                    Some(PostData {
+                        mime_type: header_value(
+                            exchange
+                                .map(|e| e.request_headers.as_slice())
+                                .unwrap_or(&[]),
+                            "content-type",
+                        )
+                        .unwrap_or_else(|| "application/octet-stream".into()),
+                        encoding: text.binary.then_some("base64"),
+                        text,
+                    })
+                }
+                None => None,
+            },
         },
         response: Response {
             status,
             status_text,
-            http_version: "HTTP/1.1",
+            http_version: version(exchange.and_then(|e| e.response_version)),
             cookies: Vec::new(),
             headers: response_headers,
-            content: content(response_body, mime),
+            trailers: exchange
+                .map(|e| headers(&e.response_trailers))
+                .unwrap_or_default(),
+            content: content(response_body.as_ref(), mime)?,
             redirect_url: exchange
                 .and_then(|e| header_value(&e.response_headers, "location"))
                 .unwrap_or_default(),
             headers_size: -1,
-            body_size: response_body.map(|b| b.seen as i64).unwrap_or(-1),
+            body_size: response_body.as_ref().map(|b| b.seen as i64).unwrap_or(-1),
         },
         cache: Cache {},
         // The proxy measures one span: request in, last response byte out. Everything else is
@@ -210,43 +260,158 @@ fn entry(event: &RequestEvent) -> Entry {
             receive: 0.0,
             ssl: -1.0,
         },
-        comment: response_body.and_then(|body| {
-            body.truncated().then(|| {
-                format!(
-                    "body truncated: {} of {} bytes retained",
-                    body.bytes.len(),
-                    body.seen
-                )
+        comment: {
+            let notes: Vec<String> = [
+                ("request", request_body.as_ref()),
+                ("response", response_body.as_ref()),
+            ]
+            .into_iter()
+            .filter_map(|(side, body)| {
+                body.filter(|b| b.len != b.seen || b.error.is_some())
+                    .map(|b| {
+                        format!(
+                            "{side} body incomplete: {} of {} bytes stored. {}",
+                            b.len,
+                            b.seen,
+                            b.error
+                                .as_deref()
+                                .unwrap_or("Capture was still in progress.")
+                        )
+                    })
             })
-        }),
+            .collect();
+            (!notes.is_empty()).then(|| notes.join(" "))
+        },
+    })
+}
+
+fn version(version: Option<http::Version>) -> &'static str {
+    match version {
+        Some(http::Version::HTTP_09) => "HTTP/0.9",
+        Some(http::Version::HTTP_10) => "HTTP/1.0",
+        Some(http::Version::HTTP_11) => "HTTP/1.1",
+        Some(http::Version::HTTP_2) => "HTTP/2",
+        Some(http::Version::HTTP_3) => "HTTP/3",
+        _ => "",
     }
 }
 
-fn content(body: Option<&Body>, mime: String) -> Content {
-    let Some(body) = body else {
-        return Content {
-            size: 0,
-            mime_type: mime,
-            text: None,
-            encoding: None,
-        };
-    };
-
-    let (text, encoding) = if body.bytes.is_empty() {
-        (None, None)
-    } else {
-        match std::str::from_utf8(&body.bytes) {
-            Ok(text) => (Some(text.to_owned()), None),
-            // A binary prefix still belongs in the capture, base64 as the spec provides for.
-            Err(_) => (Some(encode_base64(&body.bytes)), Some("base64")),
-        }
-    };
-
-    Content {
-        size: body.seen as i64,
+fn content(body: Option<&BodySnapshot>, mime: String) -> io::Result<Content> {
+    let text = body
+        .filter(|body| body.len > 0)
+        .map(|body| BodyText::new(body.clone()))
+        .transpose()?;
+    Ok(Content {
+        size: body.map_or(0, |b| b.seen as i64),
         mime_type: mime,
+        encoding: text.as_ref().filter(|text| text.binary).map(|_| "base64"),
         text,
-        encoding,
+    })
+}
+
+/// `serde_json::Serializer::collect_str` escapes incrementally, without a body-sized String.
+/// I/O failures are carried separately: returning fmt::Error for a source read would panic in
+/// serde_json's Display adapter, which assumes fmt::Error means its output writer failed.
+pub struct BodyText {
+    snapshot: BodySnapshot,
+    binary: bool,
+}
+
+impl BodyText {
+    fn new(snapshot: BodySnapshot) -> io::Result<Self> {
+        let binary = match utf8_chunks(snapshot.reader()?, |_| Ok(())) {
+            Ok(()) => false,
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => true,
+            Err(error) => return Err(error),
+        };
+        Ok(Self { snapshot, binary })
+    }
+}
+
+impl Serialize for BodyText {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        struct DisplayBody<'a> {
+            text: &'a BodyText,
+            error: std::cell::RefCell<Option<io::Error>>,
+        }
+        impl std::fmt::Display for DisplayBody<'_> {
+            fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let result = (|| -> io::Result<()> {
+                    let reader = self.text.snapshot.reader()?;
+                    if self.text.binary {
+                        // Multiple of three: only the final base64 block may contain padding.
+                        let mut reader = std::io::BufReader::new(reader);
+                        let mut buffer = [0; 3 * 8192];
+                        loop {
+                            let mut count = 0;
+                            while count < buffer.len() {
+                                let read = reader.read(&mut buffer[count..])?;
+                                if read == 0 {
+                                    break;
+                                }
+                                count += read;
+                            }
+                            if count == 0 {
+                                break;
+                            }
+                            output
+                                .write_str(&encode_base64(&buffer[..count]))
+                                .map_err(io::Error::other)?;
+                        }
+                        Ok(())
+                    } else {
+                        utf8_chunks(reader, |text| {
+                            output.write_str(text).map_err(io::Error::other)
+                        })
+                    }
+                })();
+                if let Err(error) = result {
+                    *self.error.borrow_mut() = Some(error);
+                }
+                Ok(())
+            }
+        }
+        let display = DisplayBody {
+            text: self,
+            error: Default::default(),
+        };
+        let result = serializer.collect_str(&display);
+        if let Some(error) = display.error.into_inner() {
+            return Err(serde::ser::Error::custom(error));
+        }
+        result
+    }
+}
+
+fn utf8_chunks(
+    mut reader: impl Read,
+    mut emit: impl FnMut(&str) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut buffer = [0; 32768];
+    let mut carry = 0;
+    loop {
+        let read = reader.read(&mut buffer[carry..])?;
+        let len = carry + read;
+        if len == 0 {
+            return Ok(());
+        }
+        let valid = match std::str::from_utf8(&buffer[..len]) {
+            Ok(text) => {
+                emit(text)?;
+                len
+            }
+            Err(error) if error.error_len().is_none() && read > 0 => {
+                let valid = error.valid_up_to();
+                emit(std::str::from_utf8(&buffer[..valid]).unwrap())?;
+                valid
+            }
+            Err(_) => return Err(io::Error::new(io::ErrorKind::InvalidData, "Not UTF-8")),
+        };
+        carry = len - valid;
+        buffer.copy_within(valid..len, 0);
+        if read == 0 {
+            return Ok(());
+        }
     }
 }
 
@@ -307,8 +472,8 @@ fn encode_base64(input: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proxy::state::{EventKind, ProxyState, RequestEvent};
     use crate::proxy::config::MitmMode;
+    use crate::proxy::state::{EventKind, ProxyState, RequestEvent};
 
     #[test]
     fn base64_matches_known_vectors() {
@@ -332,6 +497,49 @@ mod tests {
     }
 
     /// Every key DevTools' importer dereferences must be present with the right JSON type.
+    #[test]
+    fn exports_entire_large_unicode_and_binary_bodies_after_many_requests() {
+        let state = ProxyState::new(MitmMode::Full);
+        let text = format!("{}END-OF-FULL-RESPONSE", "é\"\n".repeat(150_000));
+        let first = state.record(RequestEvent::now(
+            "POST",
+            "https://example.com/large",
+            EventKind::Proxied,
+        ));
+        first.lock().unwrap().record_response_chunk(text.as_bytes());
+        let binary = (0..300_000).map(|i| (i % 256) as u8).collect::<Vec<_>>();
+        first.lock().unwrap().record_request_chunk(&binary);
+        for _ in 0..800 {
+            state.record(RequestEvent::now(
+                "GET",
+                "https://example.com/new",
+                EventKind::Proxied,
+            ));
+        }
+        let mut output = Vec::new();
+        write(&state.recent_events(usize::MAX), &mut output).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        let entry = &json["log"]["entries"][0];
+        assert_eq!(entry["response"]["content"]["text"], text);
+        assert_eq!(entry["request"]["postData"]["text"], encode_base64(&binary));
+        assert_eq!(entry["request"]["postData"]["_encoding"], "base64");
+        assert!(entry.get("comment").is_none());
+    }
+
+    #[test]
+    fn export_propagates_output_errors() {
+        struct Broken;
+        impl std::io::Write for Broken {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("disk full"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        assert!(write(&[], Broken).is_err());
+    }
+
     #[test]
     fn emits_the_keys_devtools_requires() {
         let state = ProxyState::new(MitmMode::Full);

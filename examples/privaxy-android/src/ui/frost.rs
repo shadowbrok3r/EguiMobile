@@ -16,7 +16,7 @@
 //!    Nothing here fades, so this is just why no opacity is applied.
 
 #[cfg(target_os = "android")]
-pub use android::{Panes, frost_chrome, remember};
+pub use android::{Panes, frost_chrome, invalidate, remember};
 
 /// Off Android there is no GL context, so these are no-ops and the simulated glass stands alone.
 #[cfg(not(target_os = "android"))]
@@ -26,10 +26,11 @@ mod stub {
 
     pub fn remember(_ctx: &egui_mobile::egui::Context, _top: egui_mobile::egui::Rect, _bottom: egui_mobile::egui::Rect) {}
     pub fn frost_chrome(_ui: &mut egui_mobile::egui::Ui) {}
+    pub fn invalidate() {}
 }
 
 #[cfg(not(target_os = "android"))]
-pub use stub::{Panes, frost_chrome, remember};
+pub use stub::{Panes, frost_chrome, invalidate, remember};
 
 #[cfg(target_os = "android")]
 mod android {
@@ -37,36 +38,48 @@ mod android {
         BlurRadius, CornerRadius, FrostOutcome, GrabPassRenderer, Presence, RepaintPolicy, Surface,
         Tint,
     };
-    use std::time::Duration;
     use egui_mobile::egui;
-    use std::sync::{Mutex, OnceLock};
+    use std::cell::RefCell;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
-    /// Built once from the live `glow` context. `None` if the app is not on the glow backend or
-    /// the shaders failed to compile — in which case the simulated glass is what shows, which is
-    /// a perfectly good fallback rather than an error worth surfacing.
-    static RENDERER: OnceLock<Option<GrabPassRenderer>> = OnceLock::new();
-    /// Last frame's chrome rects. See contract 2.
+    thread_local! {
+        static RENDERER: RefCell<Option<Arc<GrabPassRenderer>>> = const { RefCell::new(None) };
+    }
     static PANES: Mutex<Option<(egui::Rect, egui::Rect)>> = Mutex::new(None);
 
     #[derive(Default)]
     pub struct Panes;
 
-    fn renderer() -> Option<&'static GrabPassRenderer> {
-        RENDERER
-            .get_or_init(|| {
+    pub fn invalidate() {
+        // Called on the render thread after eframe has made the resumed surface current.
+        RENDERER.with(|slot| {
+            if let Some(renderer) = slot.borrow_mut().take()
+                && let Some(gl) = egui_mobile::glow_context()
+            {
+                renderer.destroy(&gl);
+            }
+        });
+        *PANES.lock().unwrap() = None;
+    }
+
+    fn renderer() -> Option<Arc<GrabPassRenderer>> {
+        RENDERER.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.is_none() {
                 let gl = egui_mobile::glow_context()?;
                 match GrabPassRenderer::new(&gl) {
                     Ok(renderer) => {
-                        log::info!("privaxy: backdrop blur ready");
-                        Some(renderer)
+                        *slot = Some(Arc::new(renderer));
                     }
                     Err(error) => {
                         log::warn!("privaxy: backdrop blur unavailable: {error}");
-                        None
+                        return None;
                     }
                 }
-            })
-            .as_ref()
+            }
+            slot.clone()
+        })
     }
 
     /// Records this frame's chrome rects for the next frame to frost.

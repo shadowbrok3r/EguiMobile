@@ -57,8 +57,16 @@ impl CertCache {
         })))
     }
 
-    pub async fn server_config(&self, authority: &Authority) -> Result<Arc<ServerConfig>, CertError> {
-        let host = authority.host().to_owned();
+    pub async fn server_config(
+        &self,
+        authority: &Authority,
+    ) -> Result<Arc<ServerConfig>, CertError> {
+        // URI authorities keep brackets around IPv6 literals; certificate IP SANs do not.
+        let host = authority
+            .host()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_owned();
 
         let mut cache = self.0.cache.lock().await;
         if let Some(minted) = cache.find(|minted| minted.host == host) {
@@ -106,9 +114,10 @@ impl CertCache {
             inner.ca_certificate_der.clone(),
         ];
 
-        let server_config = ServerConfig::builder()
+        let mut server_config = ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(chain, inner.leaf_key_der.clone_key())?;
+        server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
         Ok(Arc::new(server_config))
     }

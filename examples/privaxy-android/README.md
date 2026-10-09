@@ -18,7 +18,7 @@ cargo egui-mobile run -a --release      # from this directory
 | `~/.privaxy` via `dirs::home_dir` | app private files directory | Android has no home directory, and this is the only location writable without a storage permission. |
 | `reqwest` default TLS | `rustls-no-provider` + `webpki-roots` | reqwest's `rustls` feature forces rustls-platform-verifier, which needs Android Java helper classes this APK does not bundle and panics uninitialized. |
 | Engine on a thread behind a crossbeam channel | `RwLock<Engine>` | Matching only needs `&self`, so requests match concurrently and the HTML rewriter no longer has to `block_on` a channel round trip from inside a sync callback. |
-| Whole response buffered in memory | streamed, except HTML | A phone should not hold a video download in RAM. HTML is still buffered because cosmetic rewriting needs the whole document. |
+| Whole response buffered in memory | streamed, with bounded HTML rewriting | HTML is buffered up to 8 MiB; larger documents stream unchanged. Unsupported content encodings are preserved and never rewritten. |
 | Filter lists from `filters.privaxy.net` | upstream URLs directly | No single point of failure outside the user's control. Adds AdGuard Mobile Ads, which desktop lists largely miss. |
 | Web UI on a second port | egui, in-process | — |
 
@@ -33,15 +33,50 @@ pinning.
 **Full inspection.** Terminates TLS with a certificate minted from the local CA, so individual URLs
 and page content can be filtered — this is where cosmetic filtering and HTML rewriting happen.
 
-The catch is not the certificate, it is Android. Since Android 7, apps only trust user-installed
-CAs if they opt in through a network security config. In practice that means browsers; most other
-apps will simply fail to connect on any host this mode intercepts. Full inspection is therefore
-opt-in, and hosts that must keep working go in the **Never intercept** list.
+Installing the certificate does **not** turn inspection on. Apps targeting Android 7+ do not trust
+user-installed CAs by default; individual apps can opt in or use their own trust store. Certificate
+pinning is another independent restriction. Full inspection is therefore opt-in, and hosts whose
+apps reject the CA go in **Never intercept**. See [Android's trust configuration](https://developer.android.com/privacy-and-security/security-config)
+and [certificate pinning](https://docs.mitmproxy.org/stable/concepts/certificates/#certificate-pinning).
+
+The dashboard and Settings check the exact current CA against Android's enabled certificate store,
+including its validity dates. The check runs in the background, refreshes on return from Settings,
+and can be repeated with **Check certificate again**. Missing or invalid certificates produce a
+warning; an unavailable check stays neutral. An installed CA is not a promise that every app trusts
+it: actual client rejections remain visible in **Requests > Failed**.
 
 **Inspect these hosts** is the inverse, and usually the one you want. A host named there is
 terminated even in hostname-only mode, so a handful of hosts can be read without putting every app
 on the device behind a certificate they do not trust. Never intercept wins if a host is on both
 lists. Both are edited as chips in Settings, or from the **Interception** card on any request.
+
+### Diagnosing missing request details
+
+The proxy negotiates HTTP/2 or HTTP/1.1 with both the client and origin. Request/response trailers
+(including gRPC status) survive forwarding and appear in the inspector. Binary protobuf payloads
+remain binary; the inspector does not decode their schema.
+Inspected responses do not advertise `Alt-Svc` alternatives that could switch clients to QUIC;
+keep **Drop QUIC** enabled for cached alternatives and clients that try HTTP/3 directly.
+
+| What the log shows | Meaning / next action |
+| --- | --- |
+| TUNNEL / CONNECT | A working opaque connection. Install the current CA **and** enable full inspection or select its host. Never intercept takes precedence. |
+| TLS / CONNECT | The TLS connection itself. Individual HTTP requests appear in separate rows; use **With details** or the **Inspectable** filter. |
+| FAILED | Open Overview for the actual failure. Certificate alerts, protocol negotiation, resets, upstream errors and timeouts are distinguished. |
+| Body details | Full request and response bodies are stored privately on disk. Page through them or use **Save body** / HAR export. An incomplete body has a specific storage or transport error. |
+| No entry | Confirm capture is active, IPv6 is captured and **Drop QUIC** is enabled. UDP traffic is not HTTP-inspected; clients without TCP fallback may stop working if QUIC is dropped. |
+
+Start with **Dashboard → Open HTTPS browser test** after adding `example.com` to **Inspect these
+hosts**, then look for its GET row and client/origin protocols. That verifies capture and trust for
+that browser only. For third-party apps that reject the CA, prefer selective host inspection and
+Never intercept. For an app you develop, use Android's debug-only trust anchors. Regenerating the CA
+will not fix pinning and requires reinstalling the new certificate.
+
+Full inspection automatically attempts HTTPS on 443/8443. Other TCP ports remain tunnels unless
+their host is explicitly selected, preserving protocols such as messaging and DNS-over-TLS.
+Encrypted ClientHello can hide the true hostname, and non-HTTP TLS is not decoded. These limits
+cannot be removed by installing a CA. Changes to inspection settings apply to **new** connections;
+restart the client app or capture to close an existing pooled tunnel.
 
 ## Pointing traffic at it
 
@@ -68,7 +103,8 @@ it the same way it answers the browser's, and there is still one request log.
 **Naming the destination.** Packets carry an address; filter lists are written against hosts. In
 order:
 
-1. the TLS ClientHello's SNI, sniffed off the first bytes of any connection to 443 or 8443;
+1. the TLS ClientHello's SNI, sniffed off connections to 443 or 8443, including hellos fragmented
+   across TCP reads and TLS records (bounded to 64 KiB);
 2. otherwise, the DNS reverse map — every answer forwarded through the tun records which addresses
    a name resolved to;
 3. otherwise the address itself, which still matches IP-literal rules.
@@ -117,6 +153,17 @@ no key for.
 
 ## Inspecting a request
 
+Search, filters, pause recording, clear log and HAR export stay above the scrolling list in one
+compact row. The icon order is **filter / pause / trash / download**. The header's separate
+play/pause control starts or stops VPN capture from every screen; the toolbar's pause only stops
+adding requests to the log.
+
+Displayed rows stay still while new traffic arrives, including when sorting by size, duration or
+domain. A **new requests** counter appears beside the refresh icon; tap it to load the latest log.
+Search and filter changes also refresh the view. Opening a row reads the current exchange, and
+returning keeps your place. Captured entries and their bodies remain available throughout the session. Search covers all
+captured entries, with 100 rows per displayed page. New arrivals never move a displayed row.
+
 The Requests tab searches URLs *and* header names and values, filters by outcome / status class /
 method, sorts by time, duration, size or host, and optionally groups by registrable domain (busiest
 first, so the noisiest third party is at the top). Tapping **Inspect** opens the exchange:
@@ -133,16 +180,55 @@ How much there is to see follows directly from the interception mode:
 
 Rows with nothing to show say why rather than rendering an empty page.
 
-Bodies are teed out of the stream rather than buffered, so a video download is never held in
-memory: the first 64 KB of each direction is kept and the rest is only counted. Only the newest 60
-exchanges keep their bodies at all — older entries stay in the log as headers, status and timings,
-with their sizes intact.
+Bodies stream to files in the app's private storage. There is no 64 KiB body cap and no eviction
+after 60 requests. Disk writes use background workers with backpressure; the request log keeps
+metadata and file references rather than payload copies. Inspection loads 16 KiB pages on demand,
+with a page number and first/last controls. JSON bodies up to 512 KiB also have the expandable tree.
+**Save body** exports every stored byte; **Copy page** copies the displayed page.
 
-**Save capture** writes the whole log as HAR 1.2 and hands it to Android, which files it under
-`Download/` and offers the share sheet. It imports into Chrome DevTools (Network → Import HAR),
-Charles and Fiddler. Blocked and tunnelled entries carry status `0` with the reason in
-`statusText`, the way Chrome's own HARs record a request that produced no response; a truncated
-body sets `content.size` to what went past and `comment` to what was kept.
+A session is limited to **512 MiB of body data or 5,000 entries**. Reaching either limit pauses
+recording new entries and displays an explanation. Existing bodies are preserved. If a body hits
+the disk limit mid-stream, its retained bytes remain readable and its incomplete state is explicit;
+traffic still flows. Save the capture and clear the log to free storage and continue. Manually
+pausing recording also leaves existing data intact. Captures survive minimizing and Activity
+recreation, but a process restart / Force Stop starts a new session; export anything to keep.
+
+**Save capture** streams the whole log and its full stored bodies as HAR 1.2 in a background worker,
+then offers Android's Downloads/share flow. Export does not load a session-sized JSON document
+into memory. Chrome DevTools (Network → Import HAR), Charles and Fiddler can import it. Binary
+responses use HAR base64; binary request bodies use a `_encoding` extension. Blocked and tunnelled
+entries carry status `0` with the reason in `statusText`. Incomplete captures include the retained
+and observed lengths plus the actual storage error in `comment`. HTTP versions and `_trailers`
+are preserved. Replay streams the stored request body and records the streamed response; it will
+not replay a body known to be incomplete.
+
+### Returning to the app
+
+The proxy backend is retained independently of the Activity, so replacing the UI does not tear
+down the running proxy or erase the current capture. The Android bridge refreshes its Activity
+and GL handles on recreation. Privaxy rebuilds its blur targets on resume instead of retaining
+stale rendering resources. The local winit patch permits a replacement Activity to create its
+own event loop in a process kept alive by the foreground service and exits it on Android Destroy.
+The eframe patch handles cleanup after Suspend has already released the window. Overlapping
+old and replacement activities borrow the same backend without creating a second proxy.
+
+### Regression checks
+
+Run `cargo test -p privaxy_android --lib` from the EguiMobile workspace. Local TLS fixtures verify
+HTTP/2 on both sides, request/response trailers, HTTP/1.1 compatibility, empty responses, preserved
+unknown content encodings, and bounded HTML streaming without waiting for EOF. Additional checks
+cover fragmented ClientHello parsing, body retention and failure classification.
+
+After ARTEMIS exploration, `tests/android_lifecycle.py` exercises repeated Home/resume and
+Activity replacement while sending continuous proxy traffic. It requires ADB, Tesseract with
+English data, an explicitly selected serial, capture already enabled, and an origin reachable
+from the device. It asserts the process stays alive, the UI renders, and forwarding keeps working:
+
+```bash
+python3 tests/android_lifecycle.py --serial emulator-5554 \
+  --origin http://10.0.2.2:18760/lifecycle --output /tmp/privaxy-lifecycle
+```
+
 
 ### Reading a body
 
@@ -187,9 +273,8 @@ The inspector's **Actions** card operates on the whole exchange:
   is explicit, and having it silently blocked by a rule would defeat the point.
 - **Copy as cURL** produces a shell-quoted command — the phone-to-laptop handoff.
 
-**Pause** on the Requests screen freezes the log without touching traffic. It exists because the
-log is a ring buffer whose bodies are dropped once 60 newer entries arrive, so reading a long body
-while a page is still loading is otherwise a race.
+**Pause** stops adding new requests without touching traffic. Already captured bodies remain
+available, and bodies of requests already in progress finish recording.
 
 ## Certificates
 

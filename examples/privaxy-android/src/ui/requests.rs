@@ -7,24 +7,26 @@ use crate::ui;
 use egui_mobile::{Haptic, Host, egui};
 use std::collections::BTreeMap;
 
-/// Rows pulled from the log before filtering. The log itself holds more; drawing all of it on a
-/// phone costs more than it shows.
-const MAX_SHOWN: usize = 200;
+/// Search the whole bounded log so background CONNECTs cannot hide older inspectable requests.
+const MAX_SHOWN: usize = crate::proxy::state::MAX_LOGGED_REQUESTS;
+const ROWS_PER_PAGE: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum KindFilter {
     All,
     /// Only entries with something to inspect: everything that is not a bare CONNECT.
     Inspectable,
+    Failed,
     Blocked,
     Proxied,
     Connects,
 }
 
 impl KindFilter {
-    pub const ALL: [KindFilter; 5] = [
+    pub const ALL: [KindFilter; 6] = [
         KindFilter::All,
         KindFilter::Inspectable,
+        KindFilter::Failed,
         KindFilter::Blocked,
         KindFilter::Proxied,
         KindFilter::Connects,
@@ -34,6 +36,7 @@ impl KindFilter {
         match self {
             KindFilter::All => "All",
             KindFilter::Inspectable => "Inspectable",
+            KindFilter::Failed => "Failed",
             KindFilter::Blocked => "Blocked",
             KindFilter::Proxied => "Proxied",
             KindFilter::Connects => "Connects",
@@ -43,6 +46,7 @@ impl KindFilter {
     fn accepts(self, kind: &EventKind) -> bool {
         match self {
             KindFilter::All => true,
+            KindFilter::Failed => true, // Checked against the exchange's error below.
             // Every HTTPS connection produces a CONNECT row; hiding them is what turns the log
             // from a wall of tunnels into the requests actually worth reading.
             KindFilter::Inspectable => {
@@ -163,11 +167,14 @@ impl RequestFilters {
 }
 
 /// A row's measurements, read once so the list does not lock every exchange twice.
+#[derive(Clone)]
 struct Row {
     event: RequestEvent,
     status: Option<u16>,
     bytes: u64,
     millis: Option<i64>,
+    error: Option<String>,
+    version: Option<http::Version>,
 }
 
 /// What a tap on a row asked for.
@@ -179,112 +186,278 @@ enum RowAction {
     Block,
 }
 
+/// The displayed rows are a bounded snapshot. New traffic continues into ProxyState, but neither
+/// insertions, completed responses nor changing sort keys can move a target under the finger.
+#[derive(Default)]
+pub struct RequestView {
+    rows: Vec<Row>,
+    query: String,
+    filters: Option<RequestFilters>,
+    latest_id: u64,
+    total: usize,
+    reset_scroll: bool,
+    page: usize,
+}
+
+impl RequestView {
+    fn needs_sync(&self, query: &str, filters: &RequestFilters) -> bool {
+        let mut criteria = filters.clone();
+        criteria.show_filters = false;
+        self.rows.is_empty() || self.query != query || self.filters.as_ref() != Some(&criteria)
+    }
+
+    pub fn event(&self, id: u64) -> Option<RequestEvent> {
+        self.rows
+            .iter()
+            .find(|row| row.event.id == id)
+            .map(|row| row.event.clone())
+    }
+
+    fn sync(
+        &mut self,
+        events: Vec<RequestEvent>,
+        query: &str,
+        filters: &RequestFilters,
+        force: bool,
+    ) {
+        let mut criteria = filters.clone();
+        criteria.show_filters = false;
+        if !force
+            && !self.rows.is_empty()
+            && self.query == query
+            && self.filters.as_ref() == Some(&criteria)
+        {
+            return;
+        }
+        self.page = 0;
+        self.total = events.len();
+        self.latest_id = events.first().map_or(0, |event| event.id);
+        self.rows = collect(events, query, filters);
+        match filters.sort {
+            RequestSort::Newest => {}
+            RequestSort::Oldest => self.rows.reverse(),
+            RequestSort::Slowest => self
+                .rows
+                .sort_by_key(|row| std::cmp::Reverse(row.millis.unwrap_or(-1))),
+            RequestSort::Largest => self.rows.sort_by_key(|row| std::cmp::Reverse(row.bytes)),
+            RequestSort::Host => self.rows.sort_by(|a, b| a.event.host().cmp(b.event.host())),
+        }
+        self.query = query.to_owned();
+        self.filters = Some(criteria);
+        self.reset_scroll = true;
+    }
+}
+
 pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
-    // The inspector is routed from `app.rs` so it can own the central area outright, rather than
-    // being drawn inside the page scroller.
-    let Some(loaded) = app.loaded.as_ref() else {
+    let Some(state) = app.loaded.as_ref().map(|loaded| loaded.state.clone()) else {
         return;
     };
-
-    ui.horizontal(|ui| {
-        let filters = 72.0;
-        // The real spacing, not a guess: a hard-coded reserve is what pushed Clear log off the
-        // screen edge the moment a third button joined this row.
-        let field = (ui.available_width() - filters - ui.spacing().item_spacing.x).max(80.0);
-        ui.add_sized(
-            [field, 34.0],
-            egui::TextEdit::singleline(&mut app.request_query).hint_text("Host, path or header"),
-        );
-        let filtering = app.request_filters.show_filters;
-        if ui
-            .add_sized(
-                [filters, 34.0],
-                egui::Button::selectable(filtering, "Filters"),
-            )
-            .clicked()
-        {
-            app.request_filters.show_filters = !filtering;
-        }
-    });
-
-    ui.add_space(6.0);
+    let mut refresh = false;
     let mut save = false;
-    ui.horizontal(|ui| {
-        let gaps = ui.spacing().item_spacing.x * 2.0;
-        let each = (ui.available_width() - gaps) / 3.0;
+    let width = ui.available_width();
 
-        // Freezing the log is what makes a long body readable: the ring keeps turning while you
-        // scroll otherwise, and bodies evict once 60 newer entries arrive.
-        let paused = loaded.state.paused();
-        if ui
-            .add_sized(
-                [each, 34.0],
-                // A plain Button in both states: `selectable` paints no frame when unselected,
-                // which left it looking unlike the two buttons beside it.
-                egui::Button::new(
-                    egui::RichText::new(if paused { "Paused" } else { "Pause" })
-                        .size(12.0)
-                        .color(if paused { ui::ON_ACCENT } else { ui::TEXT }),
+    // Fixed chrome: only the rows below this toolbar are inside the scroll area.
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.spacing_mut().button_padding = egui::vec2(6.0, 3.0);
+        ui.spacing_mut().interact_size.y = 26.0;
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, 36.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                let field = (ui.available_width() - 4.0 * (36.0 + 4.0)).max(40.0);
+                ui.add_sized(
+                    [field, 26.0],
+                    egui::TextEdit::singleline(&mut app.request_query)
+                        .font(egui::FontId::proportional(12.0))
+                        .margin(egui::Margin::symmetric(6, 4))
+                        .hint_text("Host, path, header"),
+                );
+                let filter = ui::icons::button(
+                    ui,
+                    ui::icons::Icon::Filter,
+                    "Search filters and sorting",
+                    app.request_filters.show_filters || app.request_filters.is_narrowing(),
+                    36.0,
+                );
+                if filter.clicked() {
+                    app.request_filters.show_filters = !app.request_filters.show_filters;
+                }
+                let mut open = app.request_filters.show_filters;
+                egui::Popup::from_response(&filter)
+                    .open_bool(&mut open)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .frame(egui::Frame::popup(ui.style()).fill(egui::Color32::from_rgb(25, 12, 33)))
+                    .width((width - 20.0).min(420.0))
+                    .show(|ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("request_filters_popup")
+                            .max_height(ui.ctx().content_rect().height() * 0.65)
+                            .show(ui, |ui| filter_panel(&mut app.request_filters, ui));
+                    });
+                app.request_filters.show_filters = open;
+                let paused = state.paused();
+                if ui::icons::button(
+                    ui,
+                    if paused {
+                        ui::icons::Icon::Play
+                    } else {
+                        ui::icons::Icon::Pause
+                    },
+                    if paused {
+                        "Resume request recording"
+                    } else {
+                        "Pause request recording (traffic keeps flowing)"
+                    },
+                    paused,
+                    36.0,
                 )
-                .fill(if paused { ui::ACCENT_FILL } else { ui::GLASS_RAISED }),
-            )
-            .clicked()
-        {
-            loaded.state.set_paused(!paused);
-            host.haptic(Haptic::Light);
-        }
-        // Named for the log, not the search box above it.
-        if ui
-            .add_sized(
-                [each, 34.0],
-                egui::Button::new(egui::RichText::new("Clear log").size(12.0)),
-            )
-            .clicked()
-        {
-            loaded.state.clear_events();
-            app.selected_request = None;
-            host.haptic(Haptic::Light);
-        }
-        if ui
-            .add_sized(
-                [ui.available_width(), 34.0],
-                egui::Button::new(egui::RichText::new("Save .har").size(12.0)),
-            )
-            .clicked()
-        {
-            save = true;
-        }
+                .clicked()
+                {
+                    if let Some(problem) = state.storage_problem() {
+                        app.notice = Some(problem);
+                    } else {
+                        state.set_paused(!paused);
+                    }
+                    host.haptic(Haptic::Light);
+                }
+                if ui::icons::button(ui, ui::icons::Icon::Trash, "Clear request log", false, 36.0)
+                    .clicked()
+                {
+                    state.clear_events();
+                    app.request_view = RequestView::default();
+                    app.selected_request = None;
+                    refresh = true;
+                    host.haptic(Haptic::Light);
+                }
+                save = ui::icons::button(
+                    ui,
+                    ui::icons::Icon::Download,
+                    "Save capture as HAR",
+                    false,
+                    36.0,
+                )
+                .clicked();
+            },
+        );
     });
-
-    // Outside the closure and returning: `save_capture` needs `&mut app`, which the `loaded`
-    // borrow above rules out until this path stops using it.
     if save {
         save_capture(app, host);
-        return;
     }
-
-    if app.request_filters.show_filters {
-        ui.add_space(6.0);
-        filter_panel(&mut app.request_filters, ui);
-    }
-
-    ui.add_space(8.0);
 
     let query = app.request_query.trim().to_lowercase();
-    let all = loaded.state.recent_events(MAX_SHOWN);
-    let total = all.len();
-    let mut rows = collect(all, &query, &app.request_filters);
-
-    match app.request_filters.sort {
-        RequestSort::Newest => {}
-        RequestSort::Oldest => rows.reverse(),
-        RequestSort::Slowest => rows.sort_by(|a, b| b.millis.unwrap_or(-1).cmp(&a.millis.unwrap_or(-1))),
-        RequestSort::Largest => rows.sort_by(|a, b| b.bytes.cmp(&a.bytes)),
-        RequestSort::Host => rows.sort_by(|a, b| a.event.host().cmp(b.event.host())),
+    let latest = state.latest_id();
+    if refresh || app.request_view.needs_sync(&query, &app.request_filters) {
+        app.request_view.sync(
+            state.recent_events(MAX_SHOWN),
+            &query,
+            &app.request_filters,
+            refresh,
+        );
     }
+    let pending = latest.saturating_sub(app.request_view.latest_id);
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(format!(
+                "{} of {}{}",
+                app.request_view.rows.len(),
+                app.request_view.total,
+                if state.paused() {
+                    " · recording paused"
+                } else {
+                    ""
+                }
+            ))
+            .size(10.0)
+            .color(ui::MUTED),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui::icons::button(
+                ui,
+                ui::icons::Icon::Refresh,
+                "Show latest requests and refresh responses",
+                pending > 0,
+                28.0,
+            )
+            .clicked()
+            {
+                refresh = true;
+            }
+            ui.label(
+                egui::RichText::new(if pending > 0 {
+                    format!("{pending} new")
+                } else {
+                    "".to_owned()
+                })
+                .size(11.0)
+                .color(ui::ACCENT),
+            );
+        });
+    });
+    if refresh {
+        app.request_view.sync(
+            state.recent_events(MAX_SHOWN),
+            &query,
+            &app.request_filters,
+            true,
+        );
+    }
+    if let Some(problem) = state.storage_problem() {
+        ui.label(
+            egui::RichText::new(format!("Recording paused. {problem}"))
+                .size(11.0)
+                .color(ui::WARN),
+        );
+    } else {
+        ui.label(
+            egui::RichText::new(format!(
+                "{} stored · bodies kept until clear or restart",
+                ui::format_bytes(state.stored_bytes())
+            ))
+            .size(10.0)
+            .color(ui::MUTED),
+        );
+    }
+    let pages = app.request_view.rows.len().div_ceil(ROWS_PER_PAGE).max(1);
+    if pages > 1 {
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(app.request_view.page > 0, egui::Button::new("‹"))
+                .on_hover_text("Previous requests")
+                .clicked()
+            {
+                app.request_view.page -= 1;
+                app.request_view.reset_scroll = true;
+            }
+            ui.label(format!("Page {} / {pages}", app.request_view.page + 1));
+            if ui
+                .add_enabled(app.request_view.page + 1 < pages, egui::Button::new("›"))
+                .on_hover_text("Next requests")
+                .clicked()
+            {
+                app.request_view.page += 1;
+                app.request_view.reset_scroll = true;
+            }
+        });
+    }
+    ui.add_space(4.0);
 
+    let mut scroller = egui::ScrollArea::vertical()
+        .id_salt("request_rows")
+        .auto_shrink([false, false])
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible);
+    if std::mem::take(&mut app.request_view.reset_scroll) {
+        scroller = scroller.vertical_scroll_offset(0.0);
+    }
+    scroller.show(ui, |ui| show_rows(app, ui, host));
+}
+
+fn show_rows(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
+    let rows = &app.request_view.rows;
+    let start = (app.request_view.page * ROWS_PER_PAGE).min(rows.len());
+    let rows = &rows[start..(start + ROWS_PER_PAGE).min(rows.len())];
     if rows.is_empty() {
-        let narrowed = !query.is_empty() || app.request_filters.is_narrowing();
+        let narrowed = !app.request_query.trim().is_empty() || app.request_filters.is_narrowing();
         let mut reset = false;
         ui::card(ui, |ui| {
             ui.label(
@@ -296,46 +469,41 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                 .size(13.0)
                 .color(ui::MUTED),
             );
-            // Filters persist across restarts, so the app can open onto an empty list with no
-            // visible cause. Offer the way out right where the confusion is.
             if narrowed {
-                ui.add_space(8.0);
-                reset = ui
-                    .add_sized(
-                        [ui.available_width(), ui::TOUCH_HEIGHT],
-                        egui::Button::new("Clear search and filters"),
-                    )
-                    .clicked();
+                reset = ui.button("Clear search and filters").clicked();
             }
         });
         if reset {
             app.request_query.clear();
-            let show_filters = app.request_filters.show_filters;
             app.request_filters = RequestFilters::default();
-            app.request_filters.show_filters = show_filters;
             host.haptic(Haptic::Light);
         }
         return;
     }
-
-    ui.label(
-        egui::RichText::new(format!("Showing {} of {total}", rows.len()))
-            .size(10.0)
-            .color(ui::MUTED),
-    );
-    ui.add_space(6.0);
-
     let is_blocked = |target: &str| {
         app.loaded
             .as_ref()
             .is_some_and(|loaded| loaded.is_blocked(target))
     };
-
     let mut selected = None;
     let mut to_block = None;
     let mut to_unblock = None;
+    let mut draw_row = |row: &Row, ui: &mut egui::Ui| {
+        let action = ui
+            .push_id(("request", row.event.id), |ui| {
+                row_card(row, is_blocked(row.event.host()), ui)
+            })
+            .inner;
+        match action {
+            RowAction::Inspect => selected = Some(row.event.id),
+            RowAction::Block => to_block = Some(row.event.host().to_owned()),
+            RowAction::Unblock => to_unblock = Some(row.event.host().to_owned()),
+            RowAction::None => {}
+        }
+        ui.add_space(6.0);
+    };
     if app.request_filters.group_by_domain {
-        for (domain, rows) in group(rows) {
+        for (domain, rows) in group(rows.to_vec()) {
             let blocked = rows
                 .iter()
                 .filter(|row| matches!(row.event.kind, EventKind::Blocked { .. }))
@@ -349,31 +517,16 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                 .id_salt(("domain", &domain))
                 .show(ui, |ui| {
                     for row in &rows {
-                        match row_card(row, is_blocked(row.event.host()), ui) {
-                            RowAction::Inspect => selected = Some(row.event.id),
-                            RowAction::Block => to_block = Some(row.event.host().to_owned()),
-                            RowAction::Unblock => {
-                                to_unblock = Some(row.event.host().to_owned())
-                            }
-                            RowAction::None => {}
-                        }
-                        ui.add_space(6.0);
+                        draw_row(row, ui);
                     }
                 });
             ui.add_space(4.0);
         }
     } else {
-        for row in &rows {
-            match row_card(row, is_blocked(row.event.host()), ui) {
-                RowAction::Inspect => selected = Some(row.event.id),
-                RowAction::Block => to_block = Some(row.event.host().to_owned()),
-                RowAction::Unblock => to_unblock = Some(row.event.host().to_owned()),
-                RowAction::None => {}
-            }
-            ui.add_space(6.0);
+        for row in rows {
+            draw_row(row, ui);
         }
     }
-
     if let Some(id) = selected {
         app.selected_request = Some(id);
         app.inspect_tab = ui::inspect::InspectTab::Overview;
@@ -385,7 +538,6 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
     if let Some(target) = to_block {
         ui::apply_block(app, &target, host);
     }
-
     ui.add_space(16.0);
 }
 
@@ -405,25 +557,12 @@ fn save_capture(app: &mut PrivaxyApp, host: &Host) {
         return;
     }
 
-    let count = events.len();
-    match loaded.paths.export_capture(&events, chrono::Local::now()) {
-        Ok(path) => {
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            host.share_file(path.to_string_lossy().to_string());
-            app.notice = Some(format!(
-                "Saved {count} requests to Downloads as {name}. Open it with Chrome DevTools \
-                 (Network > Import HAR)."
-            ));
-            host.haptic(Haptic::Success);
-        }
-        Err(error) => {
-            app.notice = Some(format!("Could not write the capture: {error}"));
-            host.haptic(Haptic::Error);
-        }
-    }
+    let paths = loaded.paths.clone();
+    app.save_file(move || {
+        paths
+            .export_capture(&events, chrono::Local::now())
+            .map_err(|error| error.to_string())
+    });
 }
 
 fn filter_panel(filters: &mut RequestFilters, ui: &mut egui::Ui) {
@@ -504,21 +643,40 @@ fn collect(events: Vec<RequestEvent>, query: &str, filters: &RequestFilters) -> 
                 return None;
             }
 
-            let (status, bytes, matches_headers) = match event.exchange.lock() {
-                Ok(exchange) => {
-                    let matches = !query.is_empty()
-                        && exchange
-                            .request_headers
-                            .iter()
-                            .chain(exchange.response_headers.iter())
-                            .any(|(name, value)| {
-                                name.to_lowercase().contains(query)
-                                    || value.to_lowercase().contains(query)
-                            });
-                    (exchange.status, exchange.response_body.seen, matches)
-                }
-                Err(_) => (None, 0, false),
-            };
+            let (status, bytes, matches_headers, error, version, millis) =
+                match event.exchange.lock() {
+                    Ok(exchange) => {
+                        if (filters.kind == KindFilter::Inspectable && exchange.is_opaque())
+                            || (filters.kind == KindFilter::Failed && exchange.error.is_none())
+                        {
+                            return None;
+                        }
+                        let matches = !query.is_empty()
+                            && (exchange
+                                .request_headers
+                                .iter()
+                                .chain(exchange.response_headers.iter())
+                                .any(|(name, value)| {
+                                    name.to_lowercase().contains(query)
+                                        || value.to_lowercase().contains(query)
+                                })
+                                || exchange
+                                    .error
+                                    .as_ref()
+                                    .is_some_and(|error| error.to_lowercase().contains(query)));
+                        (
+                            exchange.status,
+                            exchange.response_body.seen(),
+                            matches,
+                            exchange.error.clone(),
+                            exchange.request_version,
+                            exchange
+                                .finished_at
+                                .map(|finished| (finished - event.at).num_milliseconds()),
+                        )
+                    }
+                    Err(_) => return None,
+                };
 
             if !filters.status.accepts(status) {
                 return None;
@@ -530,18 +688,13 @@ fn collect(events: Vec<RequestEvent>, query: &str, filters: &RequestFilters) -> 
                 return None;
             }
 
-            let millis = event
-                .exchange
-                .lock()
-                .ok()
-                .and_then(|exchange| exchange.finished_at)
-                .map(|finished| (finished - event.at).num_milliseconds());
-
             Some(Row {
                 event,
                 status,
                 bytes,
                 millis,
+                error,
+                version,
             })
         })
         .collect()
@@ -560,16 +713,27 @@ fn group(rows: Vec<Row>) -> Vec<(String, Vec<Row>)> {
 
 /// One row, and whichever of its actions was tapped.
 fn row_card(row: &Row, blocked: bool, ui: &mut egui::Ui) -> RowAction {
-    let (badge, color) = match &row.event.kind {
-        EventKind::Blocked { .. } => ("BLOCK", ui::BAD),
-        EventKind::Tunneled => ("TUNNEL", ui::MUTED),
-        EventKind::Intercepted => ("TLS", ui::ACCENT),
-        EventKind::Proxied => ("PROXY", ui::GOOD),
+    let (badge, color) = if row.error.is_some() {
+        ("FAILED", ui::BAD)
+    } else {
+        match &row.event.kind {
+            EventKind::Blocked { .. } => ("BLOCK", ui::BAD),
+            EventKind::Tunneled => ("TUNNEL", ui::MUTED),
+            EventKind::Intercepted => ("TLS", ui::ACCENT),
+            EventKind::Proxied => ("PROXY", ui::GOOD),
+        }
     };
 
     ui::card(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new(badge).size(10.0).strong().color(color));
+            if let Some(version) = row.version {
+                ui.label(
+                    egui::RichText::new(format!("{version:?}"))
+                        .size(10.0)
+                        .color(ui::MUTED),
+                );
+            }
             ui.label(
                 egui::RichText::new(row.event.at.format("%H:%M:%S").to_string())
                     .size(10.0)
@@ -624,6 +788,14 @@ fn row_card(row: &Row, blocked: bool, ui: &mut egui::Ui) -> RowAction {
             );
         }
 
+        if let Some(error) = &row.error {
+            ui.label(
+                egui::RichText::new(ui::elide(error, 100))
+                    .size(11.0)
+                    .color(ui::WARN),
+            );
+        }
+
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             // Block is a small icon off to the left and Inspect takes the rest of the row: they
@@ -633,11 +805,11 @@ fn row_card(row: &Row, blocked: bool, ui: &mut egui::Ui) -> RowAction {
             let block = ui
                 .add_sized(
                     [44.0, 32.0],
-                    egui::Button::new(
-                        egui::RichText::new("🚫")
-                            .size(13.0)
-                            .color(if blocked { ui::MUTED } else { ui::BAD }),
-                    ),
+                    egui::Button::new(egui::RichText::new("🚫").size(13.0).color(if blocked {
+                        ui::MUTED
+                    } else {
+                        ui::BAD
+                    })),
                 )
                 .on_hover_text(if blocked {
                     "Unblock this host"
@@ -675,5 +847,110 @@ pub fn status_color(status: u16) -> egui::Color32 {
         300..400 => ui::ACCENT,
         400..500 => ui::WARN,
         _ => ui::BAD,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proxy::config::MitmMode;
+    use crate::proxy::state::{Exchange, ProxyState};
+    use std::sync::{Arc, Mutex};
+
+    fn event(n: usize) -> RequestEvent {
+        RequestEvent {
+            id: n as u64,
+            at: chrono::Local::now(),
+            method: "GET".into(),
+            url: format!("https://{}.example.com/item/{n}", n % 3),
+            kind: EventKind::Proxied,
+            exchange: Arc::new(Mutex::new(Exchange::for_test())),
+        }
+    }
+
+    #[test]
+    fn incoming_traffic_keeps_displayed_targets_available() {
+        for sort in RequestSort::ALL {
+            let state = ProxyState::new(MitmMode::Full);
+            for n in 0..20 {
+                state.record(event(n));
+            }
+            let filters = RequestFilters {
+                sort,
+                ..Default::default()
+            };
+            let mut view = RequestView::default();
+            view.sync(state.recent_events(MAX_SHOWN), "", &filters, false);
+            view.reset_scroll = false;
+            let before: Vec<_> = view.rows.iter().map(|row| row.event.id).collect();
+            for n in 20..450 {
+                state.record(event(n));
+            }
+            view.sync(state.recent_events(MAX_SHOWN), "", &filters, false);
+            assert_eq!(
+                before,
+                view.rows.iter().map(|row| row.event.id).collect::<Vec<_>>()
+            );
+            assert!(
+                !view.reset_scroll,
+                "background arrivals must not reset scroll"
+            );
+            assert!(
+                state.event(before[0]).is_some(),
+                "older entries must stay in the capture"
+            );
+            assert!(
+                view.event(before[0]).is_some(),
+                "a displayed request must remain inspectable"
+            );
+            view.sync(state.recent_events(MAX_SHOWN), "", &filters, true);
+            assert!(view.reset_scroll);
+            assert_eq!(view.rows.len(), 450);
+            assert!(view.latest_id > *before.iter().max().unwrap());
+        }
+    }
+
+    #[test]
+    fn completed_response_does_not_resize_or_reorder_the_list() {
+        let first = event(1);
+        let second = event(2);
+        let filters = RequestFilters {
+            sort: RequestSort::Largest,
+            ..Default::default()
+        };
+        let mut view = RequestView::default();
+        view.sync(vec![second.clone(), first.clone()], "", &filters, false);
+        {
+            let mut response = first.exchange.lock().unwrap();
+            response.status = Some(503);
+            response.record_response_chunk(&[0; 1024]);
+            response.error = Some("upstream disconnected".into());
+        }
+        view.sync(vec![second.clone(), first.clone()], "", &filters, false);
+        assert_eq!(view.rows[0].event.id, 2);
+        assert!(view.rows[1].error.is_none());
+        assert_eq!(
+            view.event(1).unwrap().exchange.lock().unwrap().status,
+            Some(503)
+        );
+        view.sync(vec![second, first], "", &filters, true);
+        assert_eq!(view.rows[0].event.id, 1);
+        assert!(view.rows[0].error.is_some());
+    }
+
+    #[test]
+    fn filter_popup_preserves_position_but_changed_search_refreshes() {
+        let events = vec![event(2), event(1)];
+        let mut filters = RequestFilters::default();
+        let mut view = RequestView::default();
+        view.sync(events.clone(), "", &filters, false);
+        view.reset_scroll = false;
+        filters.show_filters = true;
+        view.sync(events.clone(), "", &filters, false);
+        assert!(!view.reset_scroll);
+        view.sync(events, "/item/1", &filters, false);
+        assert!(view.reset_scroll);
+        assert_eq!(view.rows.len(), 1);
+        assert_eq!(view.rows[0].event.id, 1);
     }
 }

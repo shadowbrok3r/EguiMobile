@@ -1,20 +1,21 @@
 //! Per-connection request handling: CONNECT interception, tunneling, and the filtered forward path.
 
 use crate::proxy::blocker::FilterEngine;
+use crate::proxy::body::CaptureBody;
 use crate::proxy::cert::CertCache;
 use crate::proxy::config::MitmMode;
 use crate::proxy::exclusions::ExclusionStore;
 use crate::proxy::state::{EventKind, Exchange, ProxyState, RequestEvent};
 use bytes::Bytes;
-use futures::TryStreamExt;
+use futures::StreamExt;
 use http::uri::{Authority, Scheme};
 use http::{HeaderMap, Uri, header};
-use http_body_util::{BodyExt, Empty, Full, StreamBody, combinators::BoxBody};
+use http_body_util::{BodyExt, BodyStream, Empty, Full, StreamBody, combinators::BoxBody};
 use hyper::body::{Frame, Incoming};
-use hyper::server::conn::http1;
+use hyper::server::conn::{http1, http2};
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use std::collections::HashSet;
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
@@ -78,7 +79,7 @@ fn handle_connect(
     authority: Authority,
 ) -> Response<ProxyBody> {
     let host = authority.host().to_owned();
-    let logged_url = format!("https://{host}/");
+    let logged_url = format!("https://{authority}/");
 
     if let Some(filter) = session.engine.check_host(&host) {
         session.state.record(
@@ -98,7 +99,12 @@ fn handle_connect(
     // to Full inspection, which breaks every app that does not trust a user CA.
     let excluded = session.exclusions.contains(&host);
     let intercepted = !excluded && session.intercepts.contains(&host);
-    let tunnel_only = excluded || (session.state.mode() == MitmMode::HostnameOnly && !intercepted);
+    let other_protocol = !crate::vpn::sniff::TLS_PORTS
+        .contains(&authority.port_u16().unwrap_or(443))
+        && !intercepted;
+    let tunnel_only = excluded
+        || other_protocol
+        || (session.state.mode() == MitmMode::HostnameOnly && !intercepted);
 
     // Every HTTPS connection produces one of these rows, so labelling matters: an intercepted
     // CONNECT used to be recorded as "tunneled" with a note saying TLS was *not* terminated —
@@ -109,6 +115,14 @@ fn handle_connect(
             format!(
                 "{host} is on the never-intercept list, so this connection is passed through byte \
                  for byte. Only the hostname is visible."
+            ),
+        )
+    } else if other_protocol {
+        (
+            EventKind::Tunneled,
+            String::from(
+                "This port is not a standard HTTPS port (443 or 8443). Its protocol is passed through \
+             unchanged. If it serves HTTPS, add the host to Inspect these hosts to inspect it.",
             ),
         )
     } else if tunnel_only {
@@ -136,18 +150,34 @@ fn handle_connect(
             Ok(upgraded) => TokioIo::new(upgraded),
             Err(error) => {
                 log::debug!("CONNECT upgrade failed for {host}: {error}");
+                note_failure(&exchange, &format!("CONNECT upgrade failed: {error}"));
                 return;
             }
         };
 
         if tunnel_only {
-            let _ = tokio::time::timeout(TUNNEL_TIMEOUT, tunnel(upgraded, &authority)).await;
+            match tokio::time::timeout(TUNNEL_TIMEOUT, tunnel(upgraded, &authority)).await {
+                Ok(Ok(())) => {
+                    if let Ok(mut open) = exchange.lock() {
+                        open.finished_at = Some(chrono::Local::now());
+                    }
+                }
+                Ok(Err(error)) => note_failure(&exchange, &format!("Tunnel failed: {error}")),
+                Err(_) => note_failure(&exchange, "Tunnel reached its 10-minute connection limit."),
+            }
         } else {
-            let _ = tokio::time::timeout(
+            if tokio::time::timeout(
                 TUNNEL_TIMEOUT,
-                intercept_tls(session, upgraded, authority, exchange),
+                intercept_tls(session, upgraded, authority, exchange.clone()),
             )
-            .await;
+            .await
+            .is_err()
+            {
+                note_failure(
+                    &exchange,
+                    "Inspected connection reached its 10-minute connection limit.",
+                );
+            }
         }
     });
 
@@ -160,7 +190,7 @@ where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     let port = authority.port_u16().unwrap_or(443);
-    let mut origin = TcpStream::connect((authority.host(), port)).await?;
+    let mut origin = TcpStream::connect((unbracket(authority.host()), port)).await?;
     tokio::io::copy_bidirectional(&mut client, &mut origin).await?;
     Ok(())
 }
@@ -174,9 +204,7 @@ async fn intercept_tls<T>(
 ) where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    // The CONNECT row is already in the log; annotate it with whatever happens next, because
-    // "opened a connection and nothing came out of it" is the single most confusing thing this
-    // proxy does and the answer is almost always the certificate.
+    // The CONNECT row reports the negotiation separately from the HTTP requests inside.
     let note = |text: String| {
         if let Ok(mut exchange) = exchange.lock() {
             exchange.note = Some(text);
@@ -187,7 +215,10 @@ async fn intercept_tls<T>(
         Ok(config) => config,
         Err(error) => {
             log::warn!("No certificate for {authority}: {error}");
-            note(format!("Could not mint a certificate for this host: {error}"));
+            note_failure(
+                &exchange,
+                &format!("Could not mint a certificate for this host: {error}"),
+            );
             return;
         }
     };
@@ -199,28 +230,25 @@ async fn intercept_tls<T>(
     .await
     {
         Ok(Ok(stream)) => stream,
-        // Overwhelmingly this is the client rejecting our certificate: either the CA is not
-        // installed, or the app does not trust user-installed CAs (the Android 7+ default).
         Ok(Err(error)) => {
             log::debug!("TLS handshake with {authority} failed: {error}");
-            note(format!(
-                "This app refused Privaxy's certificate, so nothing inside the connection is \
-                 visible. Either the certificate is not installed, or the app does not trust \
-                 user-installed CAs — which is the default for everything except browsers since \
-                 Android 7. Add {} to Never intercept to stop retrying it. ({error})",
-                authority.host()
-            ));
+            note_failure(&exchange, &tls_failure(&error));
             return;
         }
         Err(_) => {
             log::debug!("TLS handshake with {authority} timed out");
-            note(String::from("The TLS handshake timed out."));
+            note_failure(
+                &exchange,
+                "The TLS handshake timed out before an HTTP request arrived.",
+            );
             return;
         }
     };
 
-    note(String::from(
-        "TLS terminated. The requests inside are logged as their own entries.",
+    let http2 = tls_stream.get_ref().1.alpn_protocol() == Some(b"h2");
+    note(format!(
+        "TLS established using {}. Requests inside this connection appear as separate rows.",
+        if http2 { "HTTP/2" } else { "HTTP/1.1" }
     ));
 
     let service = service_fn(move |request| {
@@ -231,12 +259,61 @@ async fn intercept_tls<T>(
         }
     });
 
-    let _ = http1::Builder::new()
-        .preserve_header_case(true)
-        .title_case_headers(true)
-        .serve_connection(TokioIo::new(tls_stream), service)
-        .with_upgrades()
-        .await;
+    let result = if http2 {
+        http2::Builder::new(TokioExecutor::new())
+            .serve_connection(TokioIo::new(tls_stream), service)
+            .await
+    } else {
+        http1::Builder::new()
+            .preserve_header_case(true)
+            .title_case_headers(true)
+            .serve_connection(TokioIo::new(tls_stream), service)
+            .with_upgrades()
+            .await
+    };
+    if let Err(error) = result {
+        note_failure(
+            &exchange,
+            &format!("TLS succeeded, but the HTTP connection failed: {error}"),
+        );
+    } else if let Ok(mut open) = exchange.lock() {
+        open.finished_at = Some(chrono::Local::now());
+    }
+}
+
+fn tls_failure(error: &std::io::Error) -> String {
+    use rustls::{AlertDescription, Error};
+    match error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<Error>())
+    {
+        Some(Error::AlertReceived(
+            AlertDescription::UnknownCA
+            | AlertDescription::BadCertificate
+            | AlertDescription::CertificateUnknown
+            | AlertDescription::CertificateExpired
+            | AlertDescription::CertificateRevoked
+            | AlertDescription::UnsupportedCertificate,
+        )) => format!(
+            "The client rejected the TLS certificate. An installed user CA is not automatically \
+             trusted by apps targeting Android 7+. The app may use its own trust store or \
+             certificate pinning. Check the CA fingerprint in Settings; use Never intercept \
+             for apps that must connect without inspection. ({error})"
+        ),
+        Some(
+            Error::NoApplicationProtocol
+            | Error::AlertReceived(AlertDescription::NoApplicationProtocol),
+        ) => format!(
+            "The client could not negotiate HTTP/2 or HTTP/1.1. This may be a non-HTTP TLS protocol; use Never intercept for this host. ({error})"
+        ),
+        _ => format!(
+            "TLS negotiation failed before an HTTP request arrived. This alone does not prove certificate rejection; the client may have closed the connection or used an unsupported protocol. ({error})"
+        ),
+    }
+}
+
+fn unbracket(host: &str) -> &str {
+    host.trim_start_matches('[').trim_end_matches(']')
 }
 
 async fn forward(
@@ -283,6 +360,8 @@ async fn forward(
         );
         if let Ok(mut exchange) = exchange.lock() {
             exchange.request_headers = header_pairs(request.headers());
+            exchange.request_version = Some(request.version());
+            exchange.finished_at = Some(chrono::Local::now());
         }
         return message_response(StatusCode::FORBIDDEN, "Blocked by Privaxy.");
     }
@@ -299,22 +378,21 @@ async fn forward(
     if let Ok(mut open) = exchange.lock() {
         // What the client actually sent, before hop-by-hop headers are stripped for the origin.
         open.request_headers = header_pairs(request.headers());
+        open.request_version = Some(request.version());
     }
 
     let method = request.method().clone();
+    let is_head = method == Method::HEAD;
     let mut headers = request.headers().clone();
     strip_hop_by_hop(&mut headers);
     headers.remove(header::HOST);
 
     // Streamed rather than collected so a large upload is not held in memory; the tee keeps a
-    // bounded prefix on the way past.
-    let uploaded = exchange.clone();
-    let body = reqwest::Body::wrap_stream(request.into_body().into_data_stream().inspect_ok(
-        move |chunk: &Bytes| {
-            if let Ok(mut uploaded) = uploaded.lock() {
-                uploaded.record_request_chunk(chunk);
-            }
-        },
+    // disk-backed copy on the way past.
+    let body = reqwest::Body::wrap(CaptureBody::new(
+        request.into_body(),
+        exchange.clone(),
+        true,
     ));
 
     let response = match session
@@ -329,7 +407,11 @@ async fn forward(
         Err(error) => {
             // The exchange is already logged, so without this the row shows no status and no
             // reason — a DNS failure and a refused connection look identical to an empty response.
-            let message = format!("Privaxy could not reach {}: {error}", authority.host());
+            let message = format!(
+                "Privaxy could not reach {}: {}",
+                authority.host(),
+                error_chain(&error)
+            );
             note_failure(&exchange, &message);
             return message_response(StatusCode::BAD_GATEWAY, &message);
         }
@@ -339,43 +421,27 @@ async fn forward(
     let mut response_headers = response.headers().clone();
     if let Ok(mut open) = exchange.lock() {
         open.status = Some(status.as_u16());
-        // As received: content-encoding and length are stripped below, and the inspector should
-        // show what the origin actually said.
+        open.response_version = Some(response.version());
+        // reqwest removes encoding/length itself when it decompresses a supported encoding.
         open.response_headers = header_pairs(&response_headers);
     }
     strip_hop_by_hop(&mut response_headers);
-    // reqwest already decompressed the body, and rewriting changes its length.
-    response_headers.remove(header::CONTENT_ENCODING);
-    response_headers.remove(header::CONTENT_LENGTH);
-
-    let is_html = response_headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.contains("text/html"));
+    // The proxy cannot inspect advertised QUIC alternatives. Do not encourage a captured
+    // client to leave this working TCP connection for UDP (or retry the VPN's QUIC drop).
+    response_headers.remove(header::ALT_SVC);
+    // Preserve unsupported encodings (e.g. zstd) instead of mislabelling compressed bytes as
+    // plaintext. Never rewrite encoded bodies, HEADs or byte ranges.
+    let is_html = !is_head
+        && status != StatusCode::PARTIAL_CONTENT
+        && !response_headers.contains_key(header::CONTENT_ENCODING)
+        && response_headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("text/html"));
 
     let body = if is_html {
-        match response.bytes().await {
-            Ok(bytes) if bytes.len() <= MAX_REWRITABLE_BODY => {
-                let rewritten = rewrite_html(&url, &bytes, &session);
-                // The rewritten document, not the original: it is what the page actually ran.
-                if let Ok(mut open) = exchange.lock() {
-                    open.record_response_chunk(&rewritten);
-                }
-                full_body(rewritten)
-            }
-            Ok(bytes) => {
-                if let Ok(mut open) = exchange.lock() {
-                    open.record_response_chunk(&bytes);
-                }
-                full_body(bytes)
-            }
-            Err(error) => {
-                return message_response(
-                    StatusCode::BAD_GATEWAY,
-                    &format!("Privaxy could not read the response: {error}"),
-                );
-            }
-        }
+        response_headers.remove(header::CONTENT_LENGTH);
+        bounded_html_body(response, &url, &session, exchange.clone()).await
     } else {
         stream_body(response, exchange.clone())
     };
@@ -389,9 +455,19 @@ async fn forward(
 /// Marks a logged exchange as finished with the reason it produced no response.
 fn note_failure(exchange: &Arc<std::sync::Mutex<Exchange>>, message: &str) {
     if let Ok(mut open) = exchange.lock() {
-        open.note = Some(message.to_owned());
-        open.finished_at = Some(chrono::Local::now());
+        open.fail(message);
     }
+}
+
+fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(error) = source {
+        message.push_str(": ");
+        message.push_str(&error.to_string());
+        source = error.source();
+    }
+    message
 }
 
 /// Protocol upgrades (WebSocket, mostly) cannot be filtered, so both ends are joined and the
@@ -418,6 +494,7 @@ async fn upgrade_through(
     );
     if let Ok(mut open) = exchange.lock() {
         open.request_headers = header_pairs(request.headers());
+        open.request_version = Some(request.version());
     }
 
     let origin: Box<dyn Stream> = match connect_origin(
@@ -441,6 +518,10 @@ async fn upgrade_through(
         match hyper::client::conn::http1::handshake(TokioIo::new(origin)).await {
             Ok(pair) => pair,
             Err(error) => {
+                note_failure(
+                    &exchange,
+                    &format!("Upgrade handshake with {host} failed: {error}"),
+                );
                 return message_response(
                     StatusCode::BAD_GATEWAY,
                     &format!("Upgrade handshake with {host} failed: {error}"),
@@ -477,8 +558,23 @@ async fn upgrade_through(
     let headers = upstream_response.headers().clone();
     if let Ok(mut open) = exchange.lock() {
         open.status = Some(status.as_u16());
+        open.response_version = Some(upstream_response.version());
         open.response_headers = header_pairs(&headers);
-        open.finished_at = Some(chrono::Local::now());
+        if status == StatusCode::SWITCHING_PROTOCOLS {
+            open.finished_at = Some(chrono::Local::now());
+        }
+    }
+
+    if status != StatusCode::SWITCHING_PROTOCOLS {
+        // A refused upgrade is an ordinary HTTP response, including its diagnostic body.
+        let (mut parts, body) = upstream_response.into_parts();
+        strip_hop_by_hop(&mut parts.headers);
+        return Response::from_parts(
+            parts,
+            CaptureBody::new(body, exchange, false)
+                .map_err(std::io::Error::other)
+                .boxed(),
+        );
     }
 
     if status == StatusCode::SWITCHING_PROTOCOLS {
@@ -515,12 +611,12 @@ async fn connect_origin(
     tls: bool,
     tls_config: &Arc<rustls::ClientConfig>,
 ) -> std::io::Result<Box<dyn Stream>> {
-    let stream = TcpStream::connect((host, port)).await?;
+    let stream = TcpStream::connect((unbracket(host), port)).await?;
     if !tls {
         return Ok(Box::new(stream));
     }
 
-    let server_name = rustls_pki_types::ServerName::try_from(host.to_owned())
+    let server_name = rustls_pki_types::ServerName::try_from(unbracket(host).to_owned())
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     let stream = tokio_rustls::TlsConnector::from(tls_config.clone())
         .connect(server_name, stream)
@@ -630,27 +726,72 @@ fn request_type(headers: &HeaderMap) -> &'static str {
 }
 
 fn strip_hop_by_hop(headers: &mut HeaderMap) {
+    // Connection can nominate additional headers that belong only to this hop.
+    let nominated: Vec<_> = headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .filter_map(|name| http::HeaderName::from_bytes(name.trim().as_bytes()).ok())
+        .collect();
+    let trailers = headers
+        .get(header::TE)
+        .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"trailers"));
+    for name in nominated {
+        headers.remove(name);
+    }
     for name in HOP_BY_HOP_HEADERS {
         headers.remove(name);
     }
+    // This is the single TE value HTTP/2 permits; gRPC uses it to request response trailers.
+    if trailers {
+        headers.insert(header::TE, header::HeaderValue::from_static("trailers"));
+    }
 }
 
-/// Streams the response through to the client, keeping a bounded prefix for the inspector on the
+/// Streams the response through to the client, saving the body for the inspector on the
 /// way past. The whole body is never held: only what fits the cap, plus a running byte count.
 fn stream_body(response: reqwest::Response, exchange: Arc<Mutex<Exchange>>) -> ProxyBody {
-    let stream = response
-        .bytes_stream()
-        .inspect_ok(move |chunk: &Bytes| {
-            if let Ok(mut exchange) = exchange.lock() {
-                exchange.record_response_chunk(chunk);
-            }
-        })
-        .map_ok(Frame::data)
-        .map_err(std::io::Error::other);
-    StreamBody::new(stream).boxed()
+    CaptureBody::new(reqwest::Body::from(response), exchange, false)
+        .map_err(std::io::Error::other)
+        .boxed()
 }
 
-fn header_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
+/// Buffer HTML only up to the rewrite limit, then release the prefix and stream the remainder.
+async fn bounded_html_body(
+    response: reqwest::Response,
+    url: &str,
+    session: &Session,
+    exchange: Arc<Mutex<Exchange>>,
+) -> ProxyBody {
+    let mut body = reqwest::Body::from(response);
+    let mut prefix = bytes::BytesMut::new();
+    while let Some(frame) = body.frame().await {
+        match frame {
+            Ok(frame)
+                if frame.data_ref().is_some_and(|data| {
+                    prefix.len().saturating_add(data.len()) <= MAX_REWRITABLE_BODY
+                }) =>
+            {
+                prefix.extend_from_slice(frame.data_ref().unwrap());
+            }
+            // Includes trailers: preserve them, and skip rewriting this response.
+            frame => {
+                let start = futures::stream::iter([Ok(Frame::data(prefix.freeze())), frame]);
+                let stream = start.chain(BodyStream::new(body));
+                return CaptureBody::new(StreamBody::new(stream), exchange, false)
+                    .map_err(std::io::Error::other)
+                    .boxed();
+            }
+        }
+    }
+    let rewritten = rewrite_html(url, &prefix.freeze(), session);
+    CaptureBody::new(Full::new(rewritten), exchange, false)
+        .map_err(|never| match never {})
+        .boxed()
+}
+
+pub(super) fn header_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
     headers
         .iter()
         .map(|(name, value)| {
@@ -695,3 +836,7 @@ fn message_response(status: StatusCode, message: &str) -> Response<ProxyBody> {
     );
     response
 }
+
+#[cfg(test)]
+#[path = "session_tests.rs"]
+mod tests;
