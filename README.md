@@ -148,6 +148,11 @@ Android specifics handled by the runtime:
   `has_code = true`, `java_sources` → `egui-android/java`, and activity
   `com.github.egui_mobile.EguiNativeActivity` (plain `NativeActivity` falls back to the
   old show/hide path without spacebar cursor).
+  Temporary hidden insets during input-connection reattachment are confirmed against
+  the root insets after 300 ms before surrendering focus. Back still dismisses editing.
+  Apps must give text fields an explicit `TextEdit::id(egui::Id::new(...))` when moving
+  them between responsive UI parents; automatic IDs change with the parent and lose
+  the editing session when the keyboard changes the layout.
 - **Number keypad**: `egui_mobile::keyboard::number(&response)` after a `TextEdit` or
   `DragValue` gives that field a signed decimal keypad while it has focus (a no-op off
   Android). Every editor action key (Done, Go, Next) reaches egui as an Enter press and release.

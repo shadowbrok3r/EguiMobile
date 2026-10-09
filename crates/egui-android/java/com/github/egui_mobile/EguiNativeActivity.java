@@ -46,6 +46,18 @@ public class EguiNativeActivity extends NativeActivity {
     /** The keyboard went away without the app asking (back button/gesture). */
     private volatile boolean imeDismissed;
     private boolean imeInsetVisible;
+    // Insets can briefly report hidden while Android reattaches an input connection
+    // (e.g. rotation or an IME restart). Confirm the settled root state before ending
+    // the editing session; an immediate hide here cancels Android's pending show.
+    private static final long IME_HIDE_SETTLE_MS = 300;
+    private final Runnable confirmImeDismissed = () -> {
+        EditText edit = imeEdit;
+        if (!softImeRequested || edit == null) return;
+        WindowInsets insets = edit.getRootWindowInsets();
+        if (insets != null && !insets.isVisible(WindowInsets.Type.ime())) {
+            noteImeDismissed();
+        }
+    };
     /** Focused field is a password (egui IMEOutput.purpose); read by onCreateInputConnection. */
     private volatile boolean imePassword;
     /** {@link #setImeKind} codes, matching egui-android's ime_bridge::set_ime_kind. */
@@ -114,6 +126,7 @@ public class EguiNativeActivity extends NativeActivity {
 
     @Override
     protected void onDestroy() {
+        if (imeEdit != null) imeEdit.removeCallbacks(confirmImeDismissed);
         if (installReceiver != null) {
             try {
                 unregisterReceiver(installReceiver);
@@ -357,13 +370,17 @@ public class EguiNativeActivity extends NativeActivity {
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(1, 1);
         addContentView(edit, params);
         // The IME can go away with no input event the app can see (back button/gesture, IME's own
-        // dismiss key). Watch the ime inset for a visible→hidden edge and report it as dismissal.
+        // dismiss key). A stable visible→hidden edge is dismissal; an intermediate
+        // hidden layout during input-connection reattachment must not clear focus.
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
             edit.setOnApplyWindowInsetsListener(
                     (v, insets) -> {
                         boolean visible = insets.isVisible(WindowInsets.Type.ime());
-                        if (imeInsetVisible && !visible) {
-                            noteImeDismissed();
+                        if (visible) {
+                            v.removeCallbacks(confirmImeDismissed);
+                        } else if (imeInsetVisible && softImeRequested) {
+                            v.removeCallbacks(confirmImeDismissed);
+                            v.postDelayed(confirmImeDismissed, IME_HIDE_SETTLE_MS);
                         }
                         imeInsetVisible = visible;
                         return v.onApplyWindowInsets(insets);
@@ -388,6 +405,7 @@ public class EguiNativeActivity extends NativeActivity {
     /** Latch a keyboard dismissal the app never asked for; Rust drains it and drops focus.
      * Drops the dead session's queued events so they cannot block the next session's seed. */
     void noteImeDismissed() {
+        if (imeEdit != null) imeEdit.removeCallbacks(confirmImeDismissed);
         imeDismissed = true;
         softImeRequested = false;
         lastShowUptimeMs = 0;
@@ -780,6 +798,7 @@ public class EguiNativeActivity extends NativeActivity {
         if (edit == null) {
             return;
         }
+        edit.removeCallbacks(confirmImeDismissed);
         edit.setVisibility(View.VISIBLE);
         if (!edit.hasFocus()) {
             edit.requestFocus();
@@ -817,6 +836,7 @@ public class EguiNativeActivity extends NativeActivity {
                     batchDepth = 0;
                     batchSawSelChange = false;
                     if (edit != null) {
+                        edit.removeCallbacks(confirmImeDismissed);
                         imm.hideSoftInputFromWindow(edit.getWindowToken(), 0);
                         // Keep the view attached and focusable so the next showIme is reliable.
                         // GONE + clearFocus drops the InputConnection and lets the DecorView steal

@@ -15,3 +15,8 @@ No app-specific toolbar anchor or keyboard-height estimate is needed.
 
 Luma's `scripts/smoke-text-menu.py` additionally checks these actions against the
 Qwen prompt using OCR and pixel bounds on the existing s26ultra emulator.
+`scripts/smoke-keyboard-focus.py` in Luma additionally exercises repeated open/Back/
+reopen cycles in full and short viewports, and typing through both rotations without
+retapping. Explicit widget IDs preserve app focus across layout parents; the shared
+Java bridge confirms hidden insets after 300 ms so transient reattachment does not
+cancel Android's pending keyboard show.
