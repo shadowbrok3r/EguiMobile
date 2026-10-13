@@ -17,6 +17,11 @@ let decoder_target = surface.java_surface()?;
 surface.paint(ui, display_rect);
 ```
 
+`GpuVideoSurface::set_lut(Some((size, rgba)))` grades painted frames through a `size`-cubed color
+lookup table, uploaded on the next paint; `set_lut(None)` shows frames as decoded. `rgba` is an
+RGBA8 strip `size * size` texels wide and `size` high, where x is red plus blue times `size` and
+y is green. The shader interpolates between blue slices, so a 33-point table fits GLES 2.
+
 The producer buffer size is essential: an unsized SurfaceTexture can deliver black frames,
 and a mismatched native output window introduces borders or clipping inside the texture.
 SurfaceTexture's transform is applied when sampling. Each paint respects egui's clipping.

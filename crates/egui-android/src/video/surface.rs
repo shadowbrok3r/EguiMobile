@@ -3,8 +3,43 @@
 use egui::{Rect, Ui};
 use glow::HasContext;
 use jni::objects::{GlobalRef, JClass, JFloatArray, JLongArray, JObject, JString, JValue};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 const TEXTURE_EXTERNAL_OES: u32 = 0x8D65;
+const FRAGMENT: &str = "#version 100
+#extension GL_OES_EGL_image_external : require
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+varying vec2 v_uv;
+uniform samplerExternalOES u_video;
+uniform sampler2D u_lut;
+uniform float u_lut_size;
+vec3 grade(vec3 c) {
+    float n = u_lut_size;
+    c = clamp(c, 0.0, 1.0) * (n - 1.0);
+    float b0 = floor(c.b);
+    float b1 = min(b0 + 1.0, n - 1.0);
+    vec2 uv = vec2((c.r + 0.5) / (n * n), (c.g + 0.5) / n);
+    vec3 low = texture2D(u_lut, uv + vec2(b0 / n, 0.0)).rgb;
+    vec3 high = texture2D(u_lut, uv + vec2(b1 / n, 0.0)).rgb;
+    return mix(low, high, c.b - b0);
+}
+void main() {
+    vec3 c = texture2D(u_video, v_uv).rgb;
+    if (u_lut_size > 1.0) c = grade(c);
+    gl_FragColor = vec4(c, 1.0);
+}";
+
+/// A color lookup table for the video, uploaded on the render thread.
+#[derive(Default)]
+struct Lut {
+    /// Table set since the last paint; `Some(None)` removes the table.
+    pending: Option<Option<(u32, Vec<u8>)>>,
+    texture: Option<glow::Texture>,
+    size: u32,
+}
 
 struct Inner {
     gl: Arc<glow::Context>,
@@ -13,6 +48,7 @@ struct Inner {
     program: glow::Program,
     vao: glow::VertexArray,
     vbo: glow::Buffer,
+    lut: Mutex<Lut>,
 }
 
 impl Drop for Inner {
@@ -26,6 +62,9 @@ impl Drop for Inner {
             self.gl.delete_vertex_array(self.vao);
             self.gl.delete_buffer(self.vbo);
             self.gl.delete_texture(self.texture);
+            if let Some(lut) = self.lut.lock().ok().and_then(|l| l.texture) {
+                self.gl.delete_texture(lut);
+            }
         }
     }
 }
@@ -71,10 +110,7 @@ impl GpuVideoSurface {
                         glow::VERTEX_SHADER,
                         "#version 100\nattribute vec2 a_position; varying vec2 v_uv; uniform mat4 u_transform; void main(){gl_Position=vec4(a_position,0.0,1.0);v_uv=(u_transform*vec4((a_position+1.0)*0.5,0.0,1.0)).xy;}",
                     ),
-                    (
-                        glow::FRAGMENT_SHADER,
-                        "#version 100\n#extension GL_OES_EGL_image_external : require\nprecision mediump float; varying vec2 v_uv; uniform samplerExternalOES u_video; void main(){gl_FragColor=vec4(texture2D(u_video,v_uv).rgb,1.0);}",
-                    ),
+                    (glow::FRAGMENT_SHADER, FRAGMENT),
                 ] {
                     let shader = gl.create_shader(kind)?;
                     gl.shader_source(shader, source);
@@ -149,6 +185,7 @@ impl GpuVideoSurface {
                 program,
                 vao,
                 vbo,
+                lut: Mutex::new(Lut::default()),
             }))),
             Err(error) => {
                 let _ = env.exception_clear();
@@ -195,6 +232,15 @@ impl GpuVideoSurface {
                 ],
             );
             let _ = env.exception_clear();
+        }
+    }
+
+    /// Grades painted frames through a `size`-cubed color lookup table, or shows them as decoded with `None`.
+    /// `rgba` is a strip `size * size` texels wide and `size` high: x is red plus blue times `size`, y is green.
+    pub fn set_lut(&self, table: Option<(u32, Vec<u8>)>) {
+        let table = table.filter(|(size, rgba)| *size > 1 && rgba.len() == (*size as usize).pow(3) * 4);
+        if let Ok(mut lut) = self.0.lut.lock() {
+            lut.pending = Some(table);
         }
     }
 
@@ -269,7 +315,17 @@ impl GpuVideoSurface {
                         false,
                         &matrix,
                     );
+                    let size = bind_lut(gl, &inner.lut);
+                    gl.uniform_1_i32(gl.get_uniform_location(inner.program, "u_lut").as_ref(), 2);
+                    gl.uniform_1_f32(
+                        gl.get_uniform_location(inner.program, "u_lut_size").as_ref(),
+                        size as f32,
+                    );
+                    gl.active_texture(glow::TEXTURE1);
                     gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    gl.active_texture(glow::TEXTURE2);
+                    gl.bind_texture(glow::TEXTURE_2D, None);
+                    gl.active_texture(glow::TEXTURE1);
                     let error = gl.get_error();
                     if error != glow::NO_ERROR {
                         log::error!("GPU video GL error: {error:#x}");
@@ -283,6 +339,62 @@ impl GpuVideoSurface {
             })),
         });
     }
+}
+
+/// Uploads a pending table and binds the current one to texture unit 2; returns its size, 0 without one.
+unsafe fn bind_lut(gl: &glow::Context, lut: &Mutex<Lut>) -> u32 {
+    let Ok(mut lut) = lut.lock() else {
+        return 0;
+    };
+    unsafe {
+        gl.active_texture(glow::TEXTURE2);
+        gl.bind_sampler(2, None);
+        match lut.pending.take() {
+            Some(Some((size, rgba))) => {
+                let texture = match lut.texture {
+                    Some(texture) => texture,
+                    None => match gl.create_texture() {
+                        Ok(texture) => texture,
+                        Err(error) => {
+                            log::error!("GPU video LUT: {error}");
+                            return 0;
+                        }
+                    },
+                };
+                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                for (name, value) in [
+                    (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+                    (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+                    (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+                    (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+                ] {
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, name, value as i32);
+                }
+                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+                gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::RGBA as i32,
+                    (size * size) as i32,
+                    size as i32,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&rgba)),
+                );
+                (lut.texture, lut.size) = (Some(texture), size);
+            }
+            Some(None) => {
+                if let Some(texture) = lut.texture.take() {
+                    gl.delete_texture(texture);
+                }
+                lut.size = 0;
+            }
+            None => {}
+        }
+        gl.bind_texture(glow::TEXTURE_2D, lut.texture);
+    }
+    lut.size
 }
 
 #[derive(Default, Debug)]
