@@ -225,6 +225,9 @@ dev-sync, and native `net.http.*`/`net.tcp.*`/`net.udp.*`/`ssh.*` ops on both). 
   still pins focus/`keep_soft_keyboard`. Host `TextEdit` is in scope; WASM plugin guest
   fields may lack spacebar cursor until they share the same bridge. Swipe-typing polish
   is best-effort.
+- **MasterTech design system.** [docs/mtech-design-system.md](docs/mtech-design-system.md)
+  ports MasterTech's fonts, density metrics, colour tokens and control kit to EguiMobile apps,
+  with its default theme in `docs/mtech-default-theme.json`.
 - **ABI stability (iOS).** `egui_ios.h` is append-only and version-checked at startup;
   the Rust runtime and `EguiKit` are released in lockstep.
 

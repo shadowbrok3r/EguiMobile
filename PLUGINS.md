@@ -173,6 +173,9 @@ desktop host all apply it automatically before the first frame; a plugin's `them
 override it. `ratatui-demo` shows the matching terminal palette (Catppuccin Mocha + deep-pink
 accent) for TUI plugins.
 
+For MasterTech's design system (fonts, density, colour tokens, control kit) and its default
+theme, see [docs/mtech-design-system.md](docs/mtech-design-system.md).
+
 ## Built-in ops
 
 | op | payload | notes |
