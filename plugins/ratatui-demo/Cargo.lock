@@ -699,7 +699,7 @@ dependencies = [
 
 [[package]]
 name = "ratatui_demo"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "egui-ios-plugin-sdk",
  "ratatui",

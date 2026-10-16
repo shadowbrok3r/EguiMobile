@@ -379,7 +379,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "appstore_android"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "backdrop-blur-egui",
  "egui",
@@ -5334,7 +5334,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "plugins_android"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "egui",
  "egui-android",
@@ -5501,7 +5501,7 @@ dependencies = [
 
 [[package]]
 name = "privaxy_android"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "adblock",
  "backdrop-blur-egui",
@@ -6859,7 +6859,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "surveyor_android"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "backdrop-blur-egui",
  "egui",

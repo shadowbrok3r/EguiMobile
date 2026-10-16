@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.2.1 — 2026-10-16
+
+egui 0.37: lists scroll with momentum and rubber-band at the ends, and buttons are a little roomier with rounder corners.
+
 ## v0.2.0 — 2026-09-23
 
 Galactic glass theme matching comfyui and zc-codex. Apps show as a 2- or 3-column tile grid with update badges (or the old list); tap a tile for details. Apps with updates are pinned to the top, and Update all installs every pending update in one go.

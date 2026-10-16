@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.1.10 — 2026-10-16
+
+egui 0.37: lists scroll with momentum and rubber-band at the ends, and buttons are a little roomier with rounder corners.
+
 ## v0.1.9 — 2026-08-13
 
 Live tab layout: the micro-motion strip moves to the top beside the status

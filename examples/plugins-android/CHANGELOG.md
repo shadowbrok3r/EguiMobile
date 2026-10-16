@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.3.2 — 2026-10-16
+
+egui 0.37: lists scroll with momentum and rubber-band at the ends, and buttons are a little roomier with rounder corners. Plugins moved to the 0.37 plugin format, so update each one from the Store tab (v0.1.2, WireLab v0.2.2); older plugin builds no longer start.
+
 ## v0.3.1 — 2026-08-05
 
 egui 0.36: collapsed bottom bars no longer leave an invisible drag strip at the screen edge, and password fields now tell the keyboard not to learn them
