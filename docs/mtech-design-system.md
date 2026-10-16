@@ -7,6 +7,12 @@ Paths such as `egui-0.36.2/src/...` point into the crates.io sources of
 that version. The theme file this document describes, `docs/mtech-default-theme.json`, ships next
 to it.
 
+EguiMobile moved to egui 0.37 on 2026-10-16, after this was written; the measurements below are
+from 0.36.2. On 0.37, write `Id::unique` for `Id::new` and `UiBuilder::scope_id` for
+`UiBuilder::id`, enable egui's `monochrome_emoji_fonts` feature for the emoji glyphs, and take
+egui-phosphor from the `egui-037` branch of github.com/shadowbrok3r/egui-phosphor, because
+crates.io egui-phosphor 0.14 pins egui 0.36.
+
 ## 1. What this is
 
 This is the handoff for apps built on EguiMobile, and for plain eframe desktop apps, that want
@@ -202,8 +208,8 @@ fonts::set_text_scale(ctx, saved_scale, font_definitions);
 
 - **Start from `FontDefinitions::default()`, never `empty()`.** EguiMobile's runtime draws its
   Paste / Copy / Cut bar with the emoji 📋 📄 ✂ (`crates/egui-android/src/text_actions.rs:289-294`),
-  which come from egui's default NotoEmoji and emoji-icon-font. Keep eframe's `default_fonts`
-  feature on (`crates/egui-android/Cargo.toml:16-21` already does).
+  which come from egui's NotoEmoji and emoji-icon-font. On egui 0.37 those ship only with egui's
+  `monochrome_emoji_fonts` feature, which the workspace `egui` dependency enables (`Cargo.toml:82`).
 - Any extra face placed ahead of `phosphor` must go through `fonts::without_private_use` with its
   own `static OnceLock`. It only rewrites faces with a format 12 cmap.
 - If you save `Style`s, strip the weight families first, as MasterTech's
