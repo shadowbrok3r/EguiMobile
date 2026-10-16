@@ -344,7 +344,7 @@ mod tests {
         fn new(text: &str) -> Self {
             let ctx = Context::default();
             install(&ctx);
-            ctx.memory_mut(|m| m.request_focus(Id::new("field")));
+            ctx.memory_mut(|m| m.request_focus(Id::unique("field")));
             Self { ctx, text: text.to_owned(), password: false, multiline: false, time: 0.0, galley: None }
         }
 
@@ -366,7 +366,7 @@ mod tests {
             let mut out = self.ctx.run_ui(input, |ui| {
                 ui.add_space(300.0);
                 let edit = if self.multiline { TextEdit::multiline(&mut self.text) } else { TextEdit::singleline(&mut self.text) };
-                let o = edit.password(self.password).id(Id::new("field")).show(ui);
+                let o = edit.password(self.password).id(Id::unique("field")).show(ui);
                 galley = Some((o.galley_pos - vec2(o.galley.rect.left(), 0.0), o.galley));
             });
             out.textures_delta.clear();
@@ -390,7 +390,7 @@ mod tests {
 
         /// The selection as (secondary, primary).
         fn selection(&self) -> (usize, usize) {
-            let range = TextEditState::load(&self.ctx, Id::new("field")).unwrap().cursor.char_range().unwrap();
+            let range = TextEditState::load(&self.ctx, Id::unique("field")).unwrap().cursor.char_range().unwrap();
             (range.secondary.index.0, range.primary.index.0)
         }
 
@@ -524,7 +524,7 @@ mod tests {
         rig.down(0.1, at);
         rig.wait(HOLD_SECS + 0.05);
         assert_eq!(rig.selection(), (8, 8));
-        assert_eq!(rig.ctx.dragged_id(), Some(Id::new("field")), "egui's drag keeps a still caret lit");
+        assert_eq!(rig.ctx.dragged_id(), Some(Id::unique("field")), "egui's drag keeps a still caret lit");
         // Clear of the "fi" ligature, whose second char has no width of its own.
         for i in [7, 17, 3] {
             rig.slide(0.05, rig.pos(i));
@@ -582,15 +582,15 @@ mod tests {
     fn a_hold_on_an_unfocused_field_is_left_to_egui() {
         let ctx = Context::default();
         install(&ctx);
-        ctx.memory_mut(|m| m.request_focus(Id::new("a")));
+        ctx.memory_mut(|m| m.request_focus(Id::unique("a")));
         let (mut a, mut b) = (String::from("focused"), String::from("other words"));
         // Runs a frame and returns the second field's rect.
         let mut frame = |time: f64, events: Vec<Event>| {
             let input = RawInput { time: Some(time), events, ..Default::default() };
             let mut rect = Rect::NOTHING;
             let mut out = ctx.run_ui(input, |ui| {
-                ui.add(TextEdit::singleline(&mut a).id(Id::new("a")));
-                rect = ui.add(TextEdit::singleline(&mut b).id(Id::new("b"))).rect;
+                ui.add(TextEdit::singleline(&mut a).id(Id::unique("a")));
+                rect = ui.add(TextEdit::singleline(&mut b).id(Id::unique("b"))).rect;
             });
             out.textures_delta.clear();
             rect
@@ -599,8 +599,8 @@ mod tests {
         frame(0.1, touch(TouchPhase::Start, at));
         frame(0.1 + HOLD_SECS + 0.05, Vec::new());
         frame(1.0, Vec::new());
-        assert_eq!(ctx.memory(|m| m.focused()), Some(Id::new("a")));
-        let b = TextEditState::load(&ctx, Id::new("b")).and_then(|s| s.cursor.char_range());
+        assert_eq!(ctx.memory(|m| m.focused()), Some(Id::unique("a")));
+        let b = TextEditState::load(&ctx, Id::unique("b")).and_then(|s| s.cursor.char_range());
         assert!(b.is_none_or(|r| r.primary == r.secondary), "{b:?}");
     }
 

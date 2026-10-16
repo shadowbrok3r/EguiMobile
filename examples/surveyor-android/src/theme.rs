@@ -99,7 +99,7 @@ pub fn apply(ctx: &egui::Context) {
 pub fn ambience(ctx: &egui::Context) {
     let rect = ctx.content_rect();
     let min_dim = rect.width().min(rect.height());
-    egui::Area::new(egui::Id::new("surveyor-ambience"))
+    egui::Area::new(egui::Id::unique("surveyor-ambience"))
         .order(egui::Order::Background)
         .fixed_pos(rect.min)
         .interactable(false)

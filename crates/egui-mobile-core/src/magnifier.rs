@@ -153,7 +153,7 @@ fn paint(ctx: &Context, t: &Target, bounds: Rect) {
             .unwrap_or_default()
     });
     let visuals = ctx.global_style().visuals.clone();
-    let layer = LayerId::new(Order::Tooltip, Id::new("egui-mobile-magnifier"));
+    let layer = LayerId::new(Order::Tooltip, Id::unique("egui-mobile-magnifier"));
     let painter = ctx.layer_painter(layer);
     painter.add(visuals.popup_shadow.as_shape(lens, RADIUS));
     painter.rect_filled(lens, RADIUS, visuals.text_edit_bg_color());
@@ -236,7 +236,7 @@ mod tests {
         let input = RawInput { screen_rect: Some(screen()), time: Some(time), events, ..Default::default() };
         let mut out = ctx.run_ui(input, |ui| {
             ui.add_space(300.0);
-            ui.add(TextEdit::singleline(text).id(Id::new("field")));
+            ui.add(TextEdit::singleline(text).id(Id::unique("field")));
         });
         out.textures_delta.clear();
         // Lens text: clipped to a band above the field.
@@ -249,7 +249,7 @@ mod tests {
         install(&ctx);
         let mut text = String::from("hello magnified world");
         let at = pos2(40.0, 310.0);
-        ctx.memory_mut(|m| m.request_focus(Id::new("field")));
+        ctx.memory_mut(|m| m.request_focus(Id::unique("field")));
         assert!(!frame(&ctx, &mut text, 0.0, Vec::new()));
         assert!(!frame(&ctx, &mut text, 0.1, touch(at, true)));
         assert!(!frame(&ctx, &mut text, 0.2, Vec::new()));
@@ -262,7 +262,7 @@ mod tests {
         let ctx = Context::default();
         install(&ctx);
         let mut text = String::from("hello magnified world");
-        ctx.memory_mut(|m| m.request_focus(Id::new("field")));
+        ctx.memory_mut(|m| m.request_focus(Id::unique("field")));
         frame(&ctx, &mut text, 0.0, Vec::new());
         frame(&ctx, &mut text, 0.1, touch(pos2(20.0, 310.0), true));
         assert!(frame(&ctx, &mut text, 0.15, vec![Event::PointerMoved(pos2(60.0, 310.0))]));
@@ -274,7 +274,7 @@ mod tests {
         install(&ctx);
         let mut text = String::from("hello");
         let at = pos2(200.0, 310.0);
-        ctx.memory_mut(|m| m.request_focus(Id::new("field")));
+        ctx.memory_mut(|m| m.request_focus(Id::unique("field")));
         frame(&ctx, &mut text, 0.0, Vec::new());
         frame(&ctx, &mut text, 0.1, touch(at, true));
         assert!(frame(&ctx, &mut text, 0.1 + HOLD_SECS + 0.05, Vec::new()));
@@ -285,7 +285,7 @@ mod tests {
         let ctx = Context::default();
         install(&ctx);
         let mut text = String::from("hello");
-        ctx.memory_mut(|m| m.request_focus(Id::new("field")));
+        ctx.memory_mut(|m| m.request_focus(Id::unique("field")));
         frame(&ctx, &mut text, 0.0, Vec::new());
         frame(&ctx, &mut text, 0.1, touch(pos2(20.0, 100.0), true));
         assert!(!frame(&ctx, &mut text, 1.0, Vec::new()));
@@ -298,7 +298,7 @@ mod tests {
         set_enabled(&ctx, false);
         let mut text = String::from("hello");
         let at = pos2(20.0, 310.0);
-        ctx.memory_mut(|m| m.request_focus(Id::new("field")));
+        ctx.memory_mut(|m| m.request_focus(Id::unique("field")));
         frame(&ctx, &mut text, 0.0, Vec::new());
         frame(&ctx, &mut text, 0.1, touch(at, true));
         assert!(!frame(&ctx, &mut text, 1.0, Vec::new()));

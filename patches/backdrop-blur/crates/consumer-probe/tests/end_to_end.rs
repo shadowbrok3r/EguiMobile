@@ -108,7 +108,7 @@ fn grab_pass_composites_a_real_egui_035_frame() {
 
     // The painter must paint into OUR framebuffer, not the (nonexistent) default one.
     unsafe { gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo)) };
-    // egui_glow 0.36 drains the delta rather than reading it, so it takes &mut.
+    // egui_glow 0.37 drains the delta rather than reading it, so it takes &mut.
     painter.paint_and_update_textures([W, H], output.pixels_per_point, &prims, &mut output.textures_delta);
 
     let outcome = poll(&renderer);

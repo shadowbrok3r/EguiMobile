@@ -1,4 +1,4 @@
-Based on the crates.io eframe 0.36.2 package (MIT OR Apache-2.0).
+Based on the crates.io eframe 0.37.0 package (MIT OR Apache-2.0).
 
 `src/native/glow_integration.rs` allows shutdown after Android Suspend has dropped the window
 and released the current GL context. Save uses the optional window, as the existing suspend-save

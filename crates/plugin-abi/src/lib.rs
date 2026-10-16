@@ -15,7 +15,7 @@ pub const ABI_VERSION: u32 = 1;
 
 /// egui minor version whose serde encoding rides the wire (`RawInput`, `TextureOptions`, …).
 /// Host and guest must agree; bump alongside workspace egui upgrades.
-pub const WIRE_FORMAT: u32 = 36;
+pub const WIRE_FORMAT: u32 = 37;
 
 /// Import module name the guest links host functions from.
 pub const HOST_MODULE: &str = "egui_plugin_host";

@@ -588,7 +588,7 @@ fn text_behind_cursor_flux(ctx: &egui::Context, state: &egui::text_edit::TextEdi
     let live = ctx.output(|o| {
         o.events.iter().rev().find_map(|e| {
             let info = e.widget_info();
-            (info.typ == egui::WidgetType::TextEdit).then(|| info.current_text_value.clone()).flatten()
+            (info.role == egui::Role::TextInput).then(|| info.current_text_value.clone()).flatten()
         })
     })?;
     let committed = probe_undoer_text(state)?;

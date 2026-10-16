@@ -58,7 +58,7 @@ pub fn ambience(painter: &egui::Painter, rect: egui::Rect, ring_alpha: u8) {
 /// Paint [`ambience`] beneath every panel.
 pub fn page_ambience(ctx: &egui::Context) {
     let screen = ctx.content_rect();
-    egui::Area::new(egui::Id::new("page-ambience"))
+    egui::Area::new(egui::Id::unique("page-ambience"))
         .order(egui::Order::Background)
         .fixed_pos(screen.min)
         .movable(false)

@@ -23,7 +23,8 @@ tls = ["reqwest/rustls-no-provider", "dep:rustls", "dep:webpki-roots"]
 
 [dependencies]
 egui-mobile = { path = "../../crates/egui-mobile" }
-egui = "0.36"
+# Bundles NotoEmoji and emoji-icon-font into the default font chains.
+egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
 # Launcher icons the store extracted from each APK; PNG only, pure Rust so it
 # cross-compiles to the NDK with no system libs.
 image = { version = "0.25", default-features = false, features = ["png"] }

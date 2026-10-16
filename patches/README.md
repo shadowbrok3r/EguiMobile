@@ -25,7 +25,7 @@ Wired via workspace `[patch.crates-io]` in the root `Cargo.toml`.
 
 ## `winit` / `eframe`
 
-Vendored from crates.io `0.30.13` / `0.36.2`. Each crate's `PRIVAXY-PATCH.md` lists its edits.
+Vendored from crates.io `0.30.13` / `0.37.0`. Each crate's `PRIVAXY-PATCH.md` lists its edits.
 
 **Changes:**
 - winit `src/event_loop.rs`: the one-event-loop-per-process guard no longer applies on Android

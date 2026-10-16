@@ -137,7 +137,7 @@ pub fn apply(ctx: &egui::Context) {
 pub fn ambience(ctx: &egui::Context) {
     let rect = ctx.content_rect();
     let d = rect.width().min(rect.height()).max(1.0);
-    egui::Area::new(egui::Id::new("plugins-ambience"))
+    egui::Area::new(egui::Id::unique("plugins-ambience"))
         .order(egui::Order::Background)
         .fixed_pos(rect.min)
         .movable(false)

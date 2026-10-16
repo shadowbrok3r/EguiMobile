@@ -941,7 +941,7 @@ impl StoreApp {
         let screen = ctx.content_rect();
         let width = (screen.width() - 32.0).min(480.0);
         let mut close = false;
-        let modal = egui::Modal::new(egui::Id::new("app-detail")).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::unique("app-detail")).show(ctx, |ui| {
             ui.set_width(width);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                 close = ui.add(egui::Button::new(icons::CLOSE).min_size(egui::vec2(40.0, 36.0))).clicked();

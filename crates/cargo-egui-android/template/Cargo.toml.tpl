@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 # Git (default); use a local path for development against a clone:
 #   egui-mobile = { path = "../EguiMobile/crates/egui-mobile" }
 egui-mobile = { git = "https://github.com/shadowbrok3r/ios-egui" }
-egui = "0.36"
+egui = "0.37"
 
 # cargo-apk2 reads this to generate the APK manifest.
 [package.metadata.android]

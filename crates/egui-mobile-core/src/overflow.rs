@@ -296,8 +296,8 @@ fn offenders(widgets: &WidgetRects, bounds: Rect, allow: &[Rect]) -> Vec<Offende
 fn name_of(widgets: &WidgetRects, id: Id) -> Option<String> {
     let info = widgets.info(id)?;
     Some(match &info.label {
-        Some(label) => format!("{:?} {label:?}", info.typ),
-        None => format!("{:?}", info.typ),
+        Some(label) => format!("{:?} {label:?}", info.role),
+        None => format!("{:?}", info.role),
     })
 }
 

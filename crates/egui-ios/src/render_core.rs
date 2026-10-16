@@ -268,6 +268,7 @@ impl RenderCore {
             unit: egui::MouseWheelUnit::Point,
             delta: Vec2::new(dx_pt, dy_pt),
             phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
             modifiers: self.modifiers,
         });
     }

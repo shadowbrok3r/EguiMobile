@@ -37,7 +37,7 @@ struct Marks {
 }
 
 fn marks_id() -> Id {
-    Id::new("egui_mobile_core::keyboard::marks")
+    Id::unique("egui_mobile_core::keyboard::marks")
 }
 
 fn mark(ctx: &Context, id: Option<Id>) {

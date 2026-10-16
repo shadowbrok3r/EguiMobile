@@ -61,7 +61,7 @@ pub fn glass_panes(ctx: &egui::Context) {
     };
     let tint = Tint::from_srgb_unmultiplied(TINT);
 
-    egui::Area::new(egui::Id::new("frost-glass"))
+    egui::Area::new(egui::Id::unique("frost-glass"))
         .order(egui::Order::Middle)
         .fixed_pos(screen.min)
         .movable(false)

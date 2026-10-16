@@ -7,6 +7,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-egui = { workspace = true, features = ["default_fonts", "bytemuck", "serde"] }
+egui = { workspace = true, features = ["default_fonts", "monochrome_emoji_fonts", "bytemuck", "serde"] }
 egui-ios-plugin-abi.workspace = true
 postcard.workspace = true

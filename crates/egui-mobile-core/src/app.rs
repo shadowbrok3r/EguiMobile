@@ -13,7 +13,7 @@ pub struct CreateContext {
 /// `impl EguiApp` compiles for both iOS and Android.
 pub trait EguiApp: 'static {
     /// Build one frame of UI into the root [`egui::Ui`]. Use `ui.ctx()` for context-level calls
-    /// and `egui::CentralPanel::default().show_inside(ui, ..)` for panels.
+    /// and `egui::CentralPanel::default().show(ui, ..)` for panels.
     fn update(&mut self, ui: &mut egui::Ui, host: &Host);
 
     /// Configure style and fonts once, before the first frame.

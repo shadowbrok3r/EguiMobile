@@ -15,7 +15,7 @@ pub enum Icon {
 pub fn button(ui: &mut Ui, icon: Icon, label: &str, selected: bool, size: f32) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
     response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+        egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label)
     });
     if ui.is_rect_visible(rect) {
         let fill = if selected {

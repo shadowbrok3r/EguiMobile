@@ -150,7 +150,7 @@ Android specifics handled by the runtime:
   old show/hide path without spacebar cursor).
   Temporary hidden insets during input-connection reattachment are confirmed against
   the root insets after 300 ms before surrendering focus. Back still dismisses editing.
-  Apps must give text fields an explicit `TextEdit::id(egui::Id::new(...))` when moving
+  Apps must give text fields an explicit `TextEdit::id(egui::Id::unique(...))` when moving
   them between responsive UI parents; automatic IDs change with the parent and lose
   the editing session when the keyboard changes the layout.
 - **Number keypad**: `egui_mobile::keyboard::number(&response)` after a `TextEdit` or
@@ -233,7 +233,7 @@ dev-sync, and native `net.http.*`/`net.tcp.*`/`net.udp.*`/`ssh.*` ops on both). 
 
 ## Versions
 
-egui 0.36 · egui-wgpu 0.36 · wgpu 30 · wasmtime 47 · Rust 2024 edition.
+egui 0.37 · egui-wgpu 0.37 · wgpu 30 · wasmtime 47 · Rust 2024 edition.
 
 ## License
 

@@ -8,7 +8,8 @@ publish = false
 [workspace]
 
 [dependencies]
-egui = "0.36"
+# Bundles NotoEmoji and emoji-icon-font for the toolbar emoji.
+egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
 
 [lib]
 path = "../../crates/egui-android/src/text_actions.rs"

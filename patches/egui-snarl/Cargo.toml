@@ -1,4 +1,4 @@
-# Vendored egui-snarl 0.11.0, repinned to egui 0.36. Upstream (zakarumych/egui-snarl) still
+# Vendored egui-snarl 0.11.0, repinned to egui 0.37. Upstream (zakarumych/egui-snarl) still
 # targets 0.35 and comfyui-android's graph editor needs one egui in the graph.
 # The optional egui-probe dep and the demo example are dropped: egui-probe 0.12 pins egui 0.35,
 # and resolving it would put a second egui in the lock for a feature nothing here enables.
@@ -30,7 +30,8 @@ path = "src/lib.rs"
 
 [dependencies]
 ahash = { version = "0.8.12", default-features = false }
-egui = "0.36"
+# Bundles egui's built-in text and emoji fonts.
+egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
 egui-scale = "0.5.0"
 serde = { version = "1", features = ["derive"], optional = true }
 slab = "0.4"

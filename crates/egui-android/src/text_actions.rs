@@ -269,7 +269,7 @@ impl Dock {
             return None;
         };
         let mut action = None;
-        let response = Area::new(Id::new("egui-android-text-actions"))
+        let response = Area::new(Id::unique("egui-android-text-actions"))
             .order(Order::Foreground)
             .pivot(Align2::CENTER_BOTTOM)
             .fixed_pos(pos2(

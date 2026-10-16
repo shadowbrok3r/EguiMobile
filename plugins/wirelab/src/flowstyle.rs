@@ -371,7 +371,7 @@ pub fn graph_menu<T, V: SnarlViewer<T>>(
     let Some(graph_pos) = canvas.menu else { return };
     let mut open = canvas.menu_open;
     egui::Popup::new(
-        egui::Id::new("wirelab-flow-graph-menu"),
+        egui::Id::unique("wirelab-flow-graph-menu"),
         ui.ctx().clone(),
         egui::PopupAnchor::Position(canvas.to_global * graph_pos),
         ui.layer_id(),

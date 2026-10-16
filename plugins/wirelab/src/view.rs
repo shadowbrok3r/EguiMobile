@@ -2442,7 +2442,7 @@ impl ProjectView {
         if self.flow_view.snarl.nodes_pos_ids().count() > 3 {
             let canvas = ui.min_rect();
             let (map, snarl) = (&mut self.flow_canvas, &self.flow_view.snarl);
-            egui::Area::new(egui::Id::new("flow-minimap"))
+            egui::Area::new(egui::Id::unique("flow-minimap"))
                 .order(egui::Order::Foreground)
                 .fixed_pos(canvas.right_top() + egui::vec2(-152.0, 8.0))
                 .show(ui.ctx(), |ui| {
@@ -2748,7 +2748,7 @@ impl ProjectView {
 
         // A caret move requested by a problem row, outline chip or snippet.
         let mut jump: Option<usize> = None;
-        let editor_id = egui::Id::new("wirelab-script-editor");
+        let editor_id = egui::Id::unique("wirelab-script-editor");
 
         // Status (tap to expand the problems list) + snippet insert menu.
         let snips = self.model.as_ref().map(|m| crate::snippets::snippets_for(&m.board));

@@ -176,7 +176,7 @@ impl PluginViewport {
         focused: bool,
         hovered: bool,
     ) -> egui::RawInput {
-        let capture_id = egui::Id::new(("egui_ios_plugin_capture", plugin.instance_key));
+        let capture_id = egui::Id::unique(("egui_ios_plugin_capture", plugin.instance_key));
         let mut captured: bool = ui.ctx().data(|d| d.get_temp(capture_id)).unwrap_or(false);
 
         let host_raw = ui.input(|i| i.raw.clone());
@@ -189,7 +189,7 @@ impl PluginViewport {
         // egui 0.36 dropped `RawInput::modifiers`, so held modifiers reach the guest only as
         // events. Diffing against the last value sent to this instance restores the old
         // per-frame-state semantics: a guest focused mid-chord still learns what is held.
-        let mods_id = egui::Id::new(("egui_ios_plugin_modifiers", plugin.instance_key));
+        let mods_id = egui::Id::unique(("egui_ios_plugin_modifiers", plugin.instance_key));
         let host_mods = ui.input(|i| i.modifiers);
         let last_mods: Option<egui::Modifiers> = ui.ctx().data(|d| d.get_temp(mods_id));
         if last_mods != Some(host_mods) {

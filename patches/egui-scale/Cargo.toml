@@ -38,4 +38,6 @@ name = "egui_scale"
 path = "src/lib.rs"
 
 [dependencies.egui]
-version = "0.36"
+version = "0.37"
+# Bundles egui's built-in text and emoji fonts.
+features = ["monochrome_emoji_fonts"]

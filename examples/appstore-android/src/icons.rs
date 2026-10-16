@@ -47,7 +47,7 @@ mod tests {
         s.chars().all(|c| {
             chain.iter().any(|name| {
                 let data = &defs.font_data[name];
-                skrifa::FontRef::from_index(&data.font, data.index)
+                skrifa::FontRef::from_index(data.bytes(), data.index)
                     .map(|font| font.charmap().map(c).is_some())
                     .unwrap_or(false)
             })
