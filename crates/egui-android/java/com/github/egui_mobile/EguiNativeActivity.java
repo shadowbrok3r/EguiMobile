@@ -67,6 +67,8 @@ public class EguiNativeActivity extends NativeActivity {
     private volatile int imeKind = IME_KIND_TEXT;
     /** The hidden EditText's text after its last change, readable from the render thread. */
     private volatile String imeTextSnapshot = "";
+    private final ConcurrentLinkedQueue<String> storeRequests = new ConcurrentLinkedQueue<>();
+    private EguiStoreBridge storeBridge;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -85,6 +87,8 @@ public class EguiNativeActivity extends NativeActivity {
         applyDefaultTheme();
         super.onCreate(savedInstanceState);
         registerInstallReceiver();
+        storeBridge = new EguiStoreBridge(this);
+        receiveStoreIntent(getIntent());
     }
 
     /** Dark DeviceDefault theme for an activity whose manifest names no theme. */
@@ -111,7 +115,31 @@ public class EguiNativeActivity extends NativeActivity {
     protected void onResume() {
         super.onResume();
         reportActive(true);
+        if(storeBridge!=null) storeBridge.check(false);
     }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);setIntent(intent);receiveStoreIntent(intent);
+    }
+    private void receiveStoreIntent(Intent intent) {
+        if(!EguiStoreBridge.STORE.equals(getPackageName()) || intent==null)return;
+        try {
+            org.json.JSONObject request=new org.json.JSONObject();
+            android.net.Uri uri=intent.getData();
+            if(uri!=null && "eguiappstore".equals(uri.getScheme()) && "join".equals(uri.getHost())) {
+                request.put("server",uri.getQueryParameter("server"));request.put("code",uri.getQueryParameter("code"));
+            } else if("com.kingsofalchemy.appstore.OPEN_APP".equals(intent.getAction())) {
+                request.put("package",intent.getStringExtra("package"));
+            } else return;
+            if(storeRequests.size()<4)storeRequests.add(request.toString());
+            try {nativeImeWake();}catch(Throwable ignored){}
+        } catch(Exception ignored){}
+    }
+    public String takeStoreRequest(){String s=storeRequests.poll();return s==null?"":s;}
+    public boolean storeAvailable(){return storeBridge!=null && storeBridge.available();}
+    public void checkStoreUpdate(){runOnUiThread(()->{if(storeBridge!=null)storeBridge.check(true);});}
+    public void openAppStore(){runOnUiThread(()->{if(storeBridge!=null)storeBridge.open();});}
+    public void configureStoreUpdates(){runOnUiThread(()->StoreUpdatesJob.schedule(this));}
 
     private void reportActive(boolean active) {
         if (nativeLifecycleBroken) return;

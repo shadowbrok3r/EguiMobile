@@ -2205,6 +2205,16 @@ pub enum ScreenOrientation {
 /// `use egui_android::HostExt;`. On iOS these methods do not exist (compile error), so keep
 /// Android-only calls behind `#[cfg(target_os = "android")]` in shared app code.
 pub trait HostExt {
+    /// Whether the installed App Store can broker update checks for this app.
+    fn store_available(&self) -> bool;
+    /// Ask App Store to check this package using its own saved credentials.
+    fn check_store_update(&self);
+    /// Open this package's detail page in App Store.
+    fn open_app_store(&self);
+    /// App Store only: consume a join link or a requested package detail page as JSON.
+    fn take_store_request(&self) -> Option<String>;
+    /// App Store only: apply its saved background update preference.
+    fn configure_store_updates(&self);
     /// Lock or release the screen orientation. See [`ScreenOrientation`].
     fn set_screen_orientation(&self, o: ScreenOrientation);
     /// Install an APK on disk (self-update / sideload). Requires `REQUEST_INSTALL_PACKAGES` and
@@ -2344,6 +2354,27 @@ pub trait HostExt {
 pub use egui_mobile_core::StylusProbe;
 
 impl HostExt for Host {
+    fn configure_store_updates(&self) {
+        let _=with_activity(|env,activity|env.call_method(activity,"configureStoreUpdates","()V",&[]).map(|_|()));
+    }
+    fn store_available(&self) -> bool {
+        with_activity(|env,activity|env.call_method(activity,"storeAvailable","()Z",&[])?.z()).unwrap_or(false)
+    }
+    fn check_store_update(&self) {
+        let _=with_activity(|env,activity|env.call_method(activity,"checkStoreUpdate","()V",&[]).map(|_|()));
+    }
+    fn open_app_store(&self) {
+        let _=with_activity(|env,activity|env.call_method(activity,"openAppStore","()V",&[]).map(|_|()));
+    }
+    fn take_store_request(&self) -> Option<String> {
+        let value=with_activity(|env,activity| {
+            let text=env.call_method(activity,"takeStoreRequest","()Ljava/lang/String;",&[])?.l()?;
+            let text=jni::objects::JString::from(text);
+            let result=env.get_string(&text)?.into();
+            Ok(result)
+        });
+        value.filter(|s:&String|!s.is_empty())
+    }
     fn set_screen_orientation(&self, o: ScreenOrientation) {
         let v = match o {
             ScreenOrientation::Unspecified => SCREEN_ORIENTATION_UNSPECIFIED,
