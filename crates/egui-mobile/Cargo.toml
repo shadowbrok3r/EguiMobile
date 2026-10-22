@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+egui-mobile-theme = { path = "../egui-mobile-theme" }
 egui-mobile-core.workspace = true
 
 # iOS backend (provides the `app!` entry macro + C ABI runtime).

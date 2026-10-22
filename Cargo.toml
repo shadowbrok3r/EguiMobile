@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/egui-mobile-theme",
     "crates/egui-mobile-core",
     "crates/egui-mobile",
     "crates/egui-ios",
@@ -45,6 +46,7 @@ exclude = [
 # egui-android only builds for android targets (android-activity/eframe-android), so it is a
 # member (buildable via `cargo ndk -p egui-android`) but excluded from the default host build.
 default-members = [
+    "crates/egui-mobile-theme",
     "crates/egui-mobile-core",
     "crates/egui-mobile",
     "crates/egui-ios",

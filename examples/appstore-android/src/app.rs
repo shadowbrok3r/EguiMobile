@@ -1,6 +1,6 @@
 //! The store UI. Android-only: it drives PackageInstaller through `HostExt`.
 
-use crate::{frost, icons, theme};
+use crate::{frost, icons, job::Job, theme};
 
 use egui_mobile::egui;
 use egui_mobile::{CreateContext, EguiApp, Host, HostExt, app};
@@ -10,7 +10,6 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 const OWN_PACKAGE: &str = "com.kingsofalchemy.appstore";
@@ -46,6 +45,8 @@ struct AppEntry {
     latest: Option<ApkMeta>,
     #[serde(default)]
     has_icon: bool,
+    #[serde(default)]
+    public: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -65,6 +66,16 @@ struct Config {
     /// Catalog layout: 0 = full-width cards, otherwise tile columns.
     #[serde(default = "default_columns")]
     columns: u8,
+    #[serde(default="enabled")]
+    background_updates:bool,
+    #[serde(default="default_theme")]
+    theme: egui_mobile_theme::ThemeConfig,
+}
+fn enabled()->bool{true}
+fn default_theme() -> egui_mobile_theme::ThemeConfig {
+    let mut theme = egui_mobile_theme::ThemeConfig::default();
+    theme.select_preset("galactic");
+    theme
 }
 
 fn default_columns() -> u8 {
@@ -73,7 +84,7 @@ fn default_columns() -> u8 {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { server_url: String::new(), api_key: String::new(), columns: default_columns() }
+        Self { server_url: "https://appstore.shadowbroker.app".into(), api_key: String::new(), columns: default_columns(),background_updates:true,theme:default_theme() }
     }
 }
 
@@ -128,6 +139,7 @@ fn build_client(api_key: &str) -> Result<reqwest::Client, String> {
         }
     }
     client_builder()
+        .redirect(reqwest::redirect::Policy::none())
         .default_headers(headers)
         .connect_timeout(Duration::from_secs(10))
         .read_timeout(Duration::from_secs(30))
@@ -244,44 +256,6 @@ fn describe(err: &reqwest::Error) -> String {
 
 // ---- background jobs ----
 
-struct Job<T> {
-    rx: Option<Receiver<T>>,
-}
-
-impl<T: Send + 'static> Job<T> {
-    fn idle() -> Self {
-        Self { rx: None }
-    }
-    fn busy(&self) -> bool {
-        self.rx.is_some()
-    }
-    fn start(&mut self, ctx: egui::Context, f: impl FnOnce() -> T + Send + 'static) -> bool {
-        if self.rx.is_some() {
-            return false;
-        }
-        let (tx, rx) = channel();
-        self.rx = Some(rx);
-        std::thread::spawn(move || {
-            let _ = tx.send(f());
-            ctx.request_repaint();
-        });
-        true
-    }
-    fn poll(&mut self) -> Option<T> {
-        match self.rx.as_ref()?.try_recv() {
-            Ok(v) => {
-                self.rx = None;
-                Some(v)
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => None,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.rx = None;
-                None
-            }
-        }
-    }
-}
-
 fn block_on<T>(f: impl std::future::Future<Output = T>) -> Result<T, String> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -315,9 +289,17 @@ fn fmt_size(n: u64) -> String {
     }
 }
 
-type Catalog = (Vec<AppEntry>, Vec<(String, Vec<u8>)>);
+type Catalog = (Vec<AppEntry>, Vec<(String, Vec<u8>)>, bool);
 
 struct StoreApp {
+    is_admin: bool,
+    access_open: bool,
+    access: crate::access::AccessUi,
+    access_job: Job<Result<serde_json::Value,String>>,
+    join_job: Job<Result<(String,String),String>>,
+    invite_input: String,
+    device_name: String,
+    requested_package: Option<String>,
     cfg: Config,
     cfg_loaded: bool,
     settings_open: bool,
@@ -351,6 +333,8 @@ struct StoreApp {
 impl StoreApp {
     fn new(_cc: &CreateContext) -> Self {
         StoreApp {
+            is_admin:false,access_open:false,access:Default::default(),access_job:Job::idle(),join_job:Job::idle(),
+            invite_input:String::new(),device_name:"My phone".into(),requested_package:None,
             cfg: Config::default(),
             cfg_loaded: false,
             settings_open: false,
@@ -394,6 +378,7 @@ impl StoreApp {
         if self.cfg.server_url.is_empty() {
             self.settings_open = true;
         }
+        self.save_config(host);
     }
 
     fn save_config(&mut self, host: &Host) {
@@ -402,10 +387,12 @@ impl StoreApp {
             std::fs::create_dir_all(dir).ok();
         }
         if let Ok(text) = serde_json::to_string_pretty(&self.cfg) {
-            if let Err(e) = std::fs::write(&path, text) {
+            let temporary=path.with_extension("json.tmp");
+            if let Err(e) = std::fs::write(&temporary, text).and_then(|_|std::fs::rename(&temporary,&path)) {
                 self.set_status(format!("config not saved: {e}"), true);
             }
         }
+        host.configure_store_updates();
     }
 
     fn set_status(&mut self, s: impl Into<String>, err: bool) {
@@ -426,7 +413,8 @@ impl StoreApp {
             block_on(async move {
                 let apps = fetch_apps(&client, &base).await?;
                 let icons = fetch_icons(&client, &base, &apps).await;
-                Ok((apps, icons))
+                let who:serde_json::Value=client.get(format!("{base}/api/whoami")).send().await.map_err(|e|describe(&e))?.json().await.map_err(|e|describe(&e))?;
+                Ok((apps, icons,who["is_admin"].as_bool().unwrap_or(false)))
             })?
         });
         if started {
@@ -548,9 +536,14 @@ impl StoreApp {
     fn poll_jobs(&mut self, ctx: &egui::Context, host: &Host) {
         if let Some(result) = self.refresh.poll() {
             match result {
-                Ok((apps, icons)) => {
+                Ok((apps, icons,is_admin)) => {
+                    self.is_admin=is_admin;
+                    if !is_admin{self.access_open=false;self.access=Default::default();}
                     let n = apps.len();
                     self.apps = apps;
+                    if let Some(package)=self.requested_package.take() {
+                        self.detail=self.apps.iter().find(|a|a.package==package).map(|a|a.slug.clone());
+                    }
                     self.pending_icons = icons;
                     self.scan_installed(host);
                     let pending = self.pending_updates().len();
@@ -644,33 +637,106 @@ impl StoreApp {
                 }
             } else if self.last_scan.elapsed() > Duration::from_secs(2) {
                 self.scan_installed(host);
-                ctx.request_repaint_after(Duration::from_secs(2));
             }
         }
         self.advance_queue(ctx.clone(), host);
-        if self.refresh.busy() || self.download.busy() {
-            ctx.request_repaint_after(Duration::from_millis(120));
-        }
     }
 
     fn show_settings(&mut self, ui: &mut egui::Ui, host: &Host) {
-        ui.label("server");
-        ui.add(
+        ui.collapsing("Theme presets", |ui| {
+            if egui_mobile_theme::editor(ui, &mut self.cfg.theme, egui_mobile_theme::Density::Touch) {
+                self.cfg.theme.apply(ui.ctx(), egui_mobile_theme::Density::Touch);
+                self.save_config(host);
+            }
+        });
+        ui.separator();
+        ui.label("Store address");
+        if ui.add(
             egui::TextEdit::singleline(&mut self.cfg.server_url)
-                .hint_text("https://apps.kingsofalchemy.com")
+                .hint_text("https://appstore.shadowbroker.app")
                 .desired_width(f32::INFINITY),
-        );
-        ui.label("API key");
-        ui.add(
-            egui::TextEdit::singleline(&mut self.cfg.api_key)
-                .password(true)
-                .desired_width(f32::INFINITY),
-        );
+        ).changed(){self.cfg.api_key.clear();self.apps.clear();self.is_admin=false;}
+        ui.collapsing("Advanced · API key",|ui|{
+            ui.add(egui::TextEdit::singleline(&mut self.cfg.api_key).password(true).desired_width(f32::INFINITY));
+        });
         ui.add_space(4.0);
         if ui.button("Save & connect").clicked() {
-            self.save_config(host);
-            self.settings_open = false;
-            self.do_refresh(ui.ctx().clone());
+            match crate::access::server_url(&self.cfg.server_url){
+                Ok(url)=>{self.cfg.server_url=url;self.save_config(host);self.settings_open=false;self.do_refresh(ui.ctx().clone());}
+                Err(e)=>self.set_status(e,true),
+            }
+        }
+        ui.separator();ui.label("Join with invite");
+        ui.add(egui::TextEdit::singleline(&mut self.invite_input).hint_text("Paste an invite link or code").password(true).desired_width(f32::INFINITY));
+        ui.add(egui::TextEdit::singleline(&mut self.device_name).hint_text("Device name").desired_width(f32::INFINITY));
+        if ui.button("Join").clicked(){self.join(ui.ctx().clone());}
+        if !self.cfg.api_key.is_empty() && ui.button("Browse public apps").clicked(){
+            self.cfg.api_key.clear();self.apps.clear();self.is_admin=false;self.save_config(host);self.do_refresh(ui.ctx().clone());
+        }
+        ui.separator();
+        if ui.checkbox(&mut self.cfg.background_updates,"Check for updates in the background").changed(){self.save_config(host);}
+        if ui.button("Enable update notifications").clicked(){host.request_notification_permission();}
+    }
+
+    fn join(&mut self,ctx:egui::Context){
+        let (base,code)=match crate::access::invitation(&self.invite_input,&self.cfg.server_url){Ok(v)=>v,Err(e)=>{self.set_status(e,true);return;}};
+        let device=self.device_name.clone();
+        // Add another group to this device only for the same validated store origin.
+        let key=if base==normalize_url(&self.cfg.server_url){self.cfg.api_key.clone()}else{String::new()};
+        self.join_job.start(ctx,move||{
+            // Existing credentials never follow an invitation to another store.
+            let client=build_client(&key)?;
+            block_on(async move{
+                let response=client.post(format!("{base}/api/enroll")).json(&serde_json::json!({"code":code,"device_name":device})).send().await.map_err(|e|describe(&e))?;
+                let status=response.status();
+                let body:serde_json::Value=response.json().await.map_err(|e|describe(&e))?;
+                if !status.is_success(){return Err(body["error"].as_str().unwrap_or("Invite expired, revoked, or already used").into());}
+                let key=body["api_key"].as_str().filter(|k|!k.is_empty()).ok_or("Store returned no access credential")?.to_owned();
+                Ok((base,key))
+            })?
+        });
+        self.set_status("Joining…",false);
+    }
+
+    fn load_access(&mut self,ctx:egui::Context,command:Option<crate::access::Command>){
+        let base=normalize_url(&self.cfg.server_url);let key=self.cfg.api_key.clone();
+        self.access_job.start(ctx,move||{
+            let client=build_client(&key)?;
+            block_on(async move{
+                let request=match command {Some(command)=>client.post(format!("{base}{}",command.path)).json(&command.body),None=>client.get(format!("{base}/api/access"))};
+                let response=request.send().await.map_err(|e|describe(&e))?;let status=response.status();
+                let body:serde_json::Value=response.json().await.map_err(|e|describe(&e))?;
+                if !status.is_success(){return Err(body["error"].as_str().unwrap_or("Could not save access").into());}
+                Ok(body)
+            })?
+        });
+    }
+
+    fn poll_access(&mut self,ctx:&egui::Context,host:&Host){
+        if let Some(result)=self.join_job.poll(){match result{
+            Ok((base,key))=>{self.cfg.server_url=base;self.cfg.api_key=key;self.apps.clear();self.icons.clear();self.invite_input.clear();self.is_admin=false;self.save_config(host);self.settings_open=false;self.do_refresh(ctx.clone());}
+            Err(e)=>self.set_status(e,true),
+        }}
+        if let Some(result)=self.access_job.poll(){match result{
+            Ok(body)=>{
+                if let Some(code)=body["code"].as_str(){self.access.invite_link=format!("{}/join#{code}",normalize_url(&self.cfg.server_url));}
+                if body.get("groups").is_some(){match serde_json::from_value(body){Ok(snapshot)=>self.access.snapshot=snapshot,Err(e)=>self.set_status(format!("Could not read access: {e}"),true)}}
+                else{self.load_access(ctx.clone(),None);self.do_refresh(ctx.clone());self.set_status("Access saved",false);}
+            }
+            Err(e)=>self.set_status(e,true),
+        }}
+        // Keep the originating store stable until outstanding work has settled.
+        if self.refresh.busy() || self.join_job.busy() || self.access_job.busy() || self.download.busy() || self.queue_active() || self.watch_until.is_some(){return;}
+        if let Some(request)=host.take_store_request().and_then(|s|serde_json::from_str::<serde_json::Value>(&s).ok()){
+            if let Some(package)=request["package"].as_str(){self.requested_package=Some(package.into());self.do_refresh(ctx.clone());}
+            if let Some(server)=request["server"].as_str(){match crate::access::server_url(server){
+                Ok(base)=>{
+                    if let Some(code)=request["code"].as_str(){self.invite_input=format!("{base}/join#{code}");}
+                    else if base!=self.cfg.server_url{self.cfg.server_url=base;self.cfg.api_key.clear();self.apps.clear();self.is_admin=false;}
+                    self.settings_open=true;
+                }
+                Err(e)=>self.set_status(e,true),
+            }}
         }
     }
 
@@ -722,18 +788,18 @@ impl StoreApp {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(egui::RichText::new(&entry.name).strong().size(18.0));
                     if entry.package == OWN_PACKAGE {
-                        ui.label(egui::RichText::new("(this app)").small().color(theme::VIOLET));
+                        ui.label(egui::RichText::new("(this app)").small().color(egui_mobile_theme::color(ui.ctx(), egui_mobile_theme::Role::Primary)));
                     }
                 });
                 if !entry.package.is_empty() {
-                    ui.label(egui::RichText::new(&entry.package).monospace().small().color(theme::MUTED));
+                    ui.label(egui::RichText::new(&entry.package).monospace().small().color(ui.visuals().weak_text_color()));
                 }
                 let (text, color) = match state {
-                    AppState::Update => ("update available", theme::PINK_BRIGHT),
-                    AppState::Current => ("up to date", theme::AQUA),
-                    AppState::Installed => ("installed", theme::AQUA),
-                    AppState::NoPackage => ("no package name set", theme::PINK),
-                    AppState::NotInstalled => ("not installed", theme::MUTED),
+                    AppState::Update => ("update available", egui_mobile_theme::color(ui.ctx(), egui_mobile_theme::Role::Accent)),
+                    AppState::Current => ("up to date", egui_mobile_theme::color(ui.ctx(), egui_mobile_theme::Role::Success)),
+                    AppState::Installed => ("installed", egui_mobile_theme::color(ui.ctx(), egui_mobile_theme::Role::Success)),
+                    AppState::NoPackage => ("no package name set", egui_mobile_theme::color(ui.ctx(), egui_mobile_theme::Role::Danger)),
+                    AppState::NotInstalled => ("not installed", ui.visuals().weak_text_color()),
                 };
                 ui.label(egui::RichText::new(format!("{} {text}", icons::DOT)).small().color(color));
             });
@@ -757,7 +823,7 @@ impl StoreApp {
         }
 
         if !entry.notes.is_empty() {
-            ui.label(egui::RichText::new(&entry.notes).small().color(theme::MUTED));
+            ui.label(egui::RichText::new(&entry.notes).small().color(ui.visuals().weak_text_color()));
         }
 
         ui.add_space(10.0);
@@ -783,7 +849,7 @@ impl StoreApp {
                 };
                 let text = egui::RichText::new(format!("{} {label}", icons::INSTALL)).size(16.0);
                 let install = if state == AppState::Update {
-                    theme::primary_button(text)
+                    theme::primary_button(ui, text)
                 } else {
                     egui::Button::new(text)
                 }
@@ -834,8 +900,8 @@ impl StoreApp {
     /// One full-width glass card per row.
     fn show_app_card(&mut self, ui: &mut egui::Ui, host: &Host, entry: &AppEntry) {
         egui::Frame::new()
-            .fill(theme::surface())
-            .stroke(egui::Stroke::new(1.0, theme::RIM_BRIGHT))
+            .fill(theme::surface(ui))
+            .stroke(egui::Stroke::new(1.0, ui.visuals().window_stroke.color))
             .corner_radius(10.0)
             .inner_margin(12.0)
             .show(ui, |ui| {
@@ -869,13 +935,13 @@ impl StoreApp {
         let state = self.app_state(entry);
         let painter = ui.painter();
         let (fill, stroke) = if resp.is_pointer_button_down_on() {
-            (theme::surface_pressed(), egui::Stroke::new(1.6, theme::PINK))
+            (theme::surface_pressed(ui), egui::Stroke::new(1.6, egui_mobile_theme::color(ui.ctx(), egui_mobile_theme::Role::Danger)))
         } else if resp.hovered() {
-            (theme::surface_hovered(), egui::Stroke::new(1.4, theme::AQUA))
+            (theme::surface_hovered(ui), egui::Stroke::new(1.4, egui_mobile_theme::color(ui.ctx(), egui_mobile_theme::Role::Success)))
         } else if state == AppState::Update {
-            (theme::surface(), egui::Stroke::new(1.2, theme::rgba(255, 61, 139, 120)))
+            (theme::surface(ui), egui::Stroke::new(1.2, theme::rgba(255, 61, 139, 120)))
         } else {
-            (theme::surface(), egui::Stroke::new(1.0, theme::RIM_BRIGHT))
+            (theme::surface(ui), egui::Stroke::new(1.0, ui.visuals().window_stroke.color))
         };
         painter.rect(rect, 12.0, fill, stroke, egui::StrokeKind::Inside);
 
@@ -887,22 +953,22 @@ impl StoreApp {
 
         let mut job = egui::text::LayoutJob::single_section(
             entry.name.clone(),
-            egui::TextFormat::simple(egui::FontId::proportional(13.5), theme::INK),
+            egui::TextFormat::simple(egui::FontId::proportional(13.5), ui.visuals().text_color()),
         );
         job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - 14.0);
         job.halign = egui::Align::Center;
         let galley = painter.layout_job(job);
-        painter.galley(egui::pos2(rect.center().x, icon.bottom() + 10.0), galley, theme::INK);
+        painter.galley(egui::pos2(rect.center().x, icon.bottom() + 10.0), galley, ui.visuals().text_color());
 
         let downloading = self.downloading.as_deref() == Some(entry.slug.as_str());
         let queued = self.queue.contains(&entry.slug);
         let badge = if queued {
-            Some((theme::VIOLET, icons::QUEUED, egui::Color32::BLACK))
+            Some((egui_mobile_theme::color(ui.ctx(), egui_mobile_theme::Role::Primary), icons::QUEUED, egui::Color32::BLACK))
         } else {
             match state {
-                AppState::Update => Some((theme::PINK, icons::INSTALL, egui::Color32::WHITE)),
+                AppState::Update => Some((egui_mobile_theme::color(ui.ctx(), egui_mobile_theme::Role::Danger), icons::INSTALL, egui::Color32::WHITE)),
                 AppState::Current | AppState::Installed => {
-                    Some((theme::AQUA, icons::CHECK, egui::Color32::from_rgb(6, 24, 24)))
+                    Some((egui_mobile_theme::color(ui.ctx(), egui_mobile_theme::Role::Success), icons::CHECK, egui::Color32::from_rgb(6, 24, 24)))
                 }
                 _ => None,
             }
@@ -926,7 +992,7 @@ impl StoreApp {
             painter.rect_filled(
                 egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac, bar.height())),
                 2.0,
-                theme::PINK,
+                egui_mobile_theme::color(ui.ctx(), egui_mobile_theme::Role::Danger),
             );
         }
     }
@@ -977,18 +1043,20 @@ enum AppState {
 
 impl EguiApp for StoreApp {
     fn theme(&self, ctx: &egui::Context) {
-        theme::apply(ctx);
+        self.cfg.theme.apply(ctx, egui_mobile_theme::Density::Touch);
     }
 
     fn update(&mut self, ui: &mut egui::Ui, host: &Host) {
         if !self.cfg_loaded {
             self.load_config(host);
+            self.cfg.theme.apply(ui.ctx(), egui_mobile_theme::Density::Touch);
             if !self.cfg.server_url.is_empty() {
                 self.do_refresh(ui.ctx().clone());
             }
         }
         let ctx = ui.ctx().clone();
         self.poll_jobs(&ctx, host);
+        self.poll_access(&ctx,host);
         theme::page_ambience(&ctx);
         frost::glass_panes(&ctx);
 
@@ -1005,6 +1073,10 @@ impl EguiApp for StoreApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::selectable_label(ui, self.settings_open, icons::SETTINGS).clicked() {
                     self.settings_open = !self.settings_open;
+                }
+                if self.is_admin && theme::selectable_label(ui,self.access_open,"Sharing").clicked(){
+                    self.access_open=!self.access_open;
+                    if self.access_open{self.load_access(ctx.clone(),None);}
                 }
                 ui.add_space(6.0);
                 for (value, label) in [(3u8, "3"), (2, "2"), (0, "List")] {
@@ -1035,7 +1107,7 @@ impl EguiApp for StoreApp {
                     self.stop_update_all();
                 }
             } else if pending > 0 {
-                let all = theme::primary_button(
+                let all = theme::primary_button(ui,
                     egui::RichText::new(format!("{}  Update all ({pending})", icons::INSTALL)).size(15.0),
                 )
                 .min_size(egui::vec2(w, 46.0));
@@ -1046,13 +1118,28 @@ impl EguiApp for StoreApp {
             }
         });
         if !self.status.is_empty() {
-            let color = if self.status_err { theme::PINK } else { theme::MUTED };
+            let color = if self.status_err { egui_mobile_theme::color(ui.ctx(), egui_mobile_theme::Role::Danger) } else { ui.visuals().weak_text_color() };
             ui.label(egui::RichText::new(&self.status).small().color(color));
         }
 
         if self.settings_open {
             ui.separator();
-            self.show_settings(ui, host);
+            let ready=!self.join_job.busy() && !self.refresh.busy() && !self.download.busy() && !self.access_job.busy() && !self.queue_active() && self.watch_until.is_none();
+            theme::scroll_vertical().id_salt("store-settings")
+                .max_height(ui.available_height() * 0.75)
+                .show(ui, |ui| { ui.add_enabled_ui(ready,|ui|self.show_settings(ui, host)); });
+        }
+
+        if self.access_open && self.is_admin {
+            let mut command=None;
+            egui::ScrollArea::vertical().show(ui,|ui|{
+                ui.add_enabled_ui(!self.access_job.busy(),|ui|{
+                    let apps=self.apps.iter().map(|a|(a.slug.clone(),a.name.clone(),a.public)).collect::<Vec<_>>();
+                    command=self.access.show(ui,&apps);
+                });
+            });
+            if let Some(command)=command{self.load_access(ctx,Some(command));}
+            return;
         }
 
         if !host.can_install_packages() {
@@ -1060,7 +1147,7 @@ impl EguiApp for StoreApp {
             ui.horizontal_wrapped(|ui| {
                 ui.label(
                     egui::RichText::new(format!("{} Installing needs the \"install unknown apps\" grant.", icons::WARN))
-                        .color(theme::AQUA_BRIGHT),
+                        .color(egui_mobile_theme::color(ui.ctx(), egui_mobile_theme::Role::Info)),
                 );
                 if ui.button("Grant").clicked() {
                     host.request_install_permission();
@@ -1076,7 +1163,7 @@ impl EguiApp for StoreApp {
             if entries.is_empty() && !self.refresh.busy() {
                 ui.add_space(24.0);
                 ui.vertical_centered(|ui| {
-                    ui.label(egui::RichText::new("no apps yet — connect in Settings").weak());
+                    ui.label(egui::RichText::new("No apps available. Join with an invite in Settings.").weak());
                 });
             }
             if cols == 0 {
@@ -1090,6 +1177,19 @@ impl EguiApp for StoreApp {
         });
 
         self.show_detail(&ctx, host);
+
+        // Schedule after every UI action: a download or changelog request may have
+        // started after poll_jobs ran. Keep polling throughout installer handoff,
+        // including frames before the next installed-version scan is due. Android's
+        // installer result is latched by the host and does not itself request a frame.
+        if self.refresh.busy()
+            || self.download.busy()
+            || self.changelog_job.busy()
+            || self.watch_until.is_some()
+            || self.queue_active()
+        {
+            ctx.request_repaint_after(Duration::from_millis(120));
+        }
     }
 }
 

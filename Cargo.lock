@@ -379,11 +379,12 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "appstore_android"
-version = "0.2.1"
+version = "0.3.2"
 dependencies = [
  "backdrop-blur-egui",
  "egui",
  "egui-mobile",
+ "egui-mobile-theme",
  "image",
  "log",
  "reqwest",
@@ -2111,7 +2112,9 @@ dependencies = [
  "pollster",
  "profiling",
  "raw-window-handle",
+ "ron",
  "send_wrapper",
+ "serde",
  "static_assertions",
  "wasm-bindgen",
  "web-sys",
@@ -2136,6 +2139,7 @@ dependencies = [
  "log",
  "nohash-hasher",
  "profiling",
+ "ron",
  "serde",
  "smallvec",
  "unicode-segmentation",
@@ -2180,6 +2184,7 @@ version = "0.1.4"
 dependencies = [
  "bytemuck",
  "egui",
+ "egui-mobile-theme",
  "postcard",
  "serde",
  "serde_bytes",
@@ -2224,6 +2229,7 @@ dependencies = [
  "egui-android",
  "egui-ios",
  "egui-mobile-core",
+ "egui-mobile-theme",
 ]
 
 [[package]]
@@ -2232,6 +2238,28 @@ version = "0.1.4"
 dependencies = [
  "egui",
  "log",
+]
+
+[[package]]
+name = "egui-mobile-theme"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "egui-theme-kit",
+]
+
+[[package]]
+name = "egui-theme-kit"
+version = "0.1.0"
+source = "git+https://github.com/shadowbrok3r/egui-theme-kit?rev=09d1e793076357ec5d86df7e1d6771d0306f2e70#09d1e793076357ec5d86df7e1d6771d0306f2e70"
+dependencies = [
+ "anyhow",
+ "eframe",
+ "egui",
+ "egui_extras",
+ "log",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2272,11 +2300,26 @@ dependencies = [
  "objc2-ui-kit 0.3.2",
  "profiling",
  "raw-window-handle",
+ "serde",
  "smithay-clipboard",
  "web-time",
  "webbrowser",
  "windows-sys 0.61.2",
  "winit",
+]
+
+[[package]]
+name = "egui_extras"
+version = "0.37.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "def286cf47194f3fe45b8e37c503ada7a20a64b59a903b4bc704baec943b1827"
+dependencies = [
+ "ahash",
+ "egui",
+ "enum-map",
+ "itertools 0.15.0",
+ "log",
+ "profiling",
 ]
 
 [[package]]
@@ -2395,6 +2438,26 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "enum-map"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4532960034c15ba2f55e9eee631040ecc473c32e6c4b200828c759840f13a06"
+dependencies = [
+ "enum-map-derive",
+]
+
+[[package]]
+name = "enum-map-derive"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7127272f64b3e098f7d81f350d672081b879bff896d219c42370dc858b1af9ff"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -6024,6 +6087,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ron"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81116b9531d61eabc41aeb228e4b6b2435bcca3233b98cf3b3077d4e6e9debb3"
+dependencies = [
+ "bitflags 2.13.2",
+ "once_cell",
+ "serde",
+ "serde_derive",
+ "typeid",
+ "unicode-ident",
+]
+
+[[package]]
 name = "roxmltree"
 version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7366,6 +7443,12 @@ name = "typed-path"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
+
+[[package]]
+name = "typeid"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc7d623258602320d5c55d1bc22793b57daff0ec7efc270ea7d55ce1d5f5471c"
 
 [[package]]
 name = "typenum"
