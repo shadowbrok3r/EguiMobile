@@ -3,7 +3,7 @@ name = "appstore_android"
 # Android versionCode is derived from this: (1<<24)|(major<<16)|(minor<<8)|patch.
 # BUMP IT before every release build — the phone only offers an update whose code is strictly
 # greater than the installed one, so shipping twice at the same version is a silent no-op.
-version = "0.2.1"
+version = "0.3.2"
 edition = "2024"
 publish = false
 
@@ -22,6 +22,7 @@ default = ["tls"]
 tls = ["reqwest/rustls-no-provider", "dep:rustls", "dep:webpki-roots"]
 
 [dependencies]
+egui-mobile-theme = { path = "../../crates/egui-mobile-theme" }
 egui-mobile = { path = "../../crates/egui-mobile" }
 # Bundles NotoEmoji and emoji-icon-font into the default font chains.
 egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
@@ -65,6 +66,8 @@ keystore_password = "android"
 label = "App Store"
 icon = "@mipmap/ic_launcher"
 has_code = true
+# Both HTTP clients enforce HTTPS except local loopback/emulator development endpoints.
+uses_cleartext_traffic = true
 
 [[package.metadata.android.application.activity]]
 name = "com.github.egui_mobile.EguiNativeActivity"
@@ -76,6 +79,30 @@ value = "appstore_android"
 [[package.metadata.android.application.activity.intent_filter]]
 actions = ["android.intent.action.MAIN"]
 categories = ["android.intent.category.LAUNCHER"]
+
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.VIEW"]
+categories = ["android.intent.category.DEFAULT", "android.intent.category.BROWSABLE"]
+[[package.metadata.android.application.activity.intent_filter.data]]
+scheme = "eguiappstore"
+host = "join"
+
+[[package.metadata.android.application.service]]
+name = "com.github.egui_mobile.StoreUpdateService"
+exported = true
+
+[[package.metadata.android.application.service]]
+name = "com.github.egui_mobile.StoreUpdatesJob"
+exported = true
+permission = "android.permission.BIND_JOB_SERVICE"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.POST_NOTIFICATIONS"
+[[package.metadata.android.uses_permission]]
+name = "android.permission.RECEIVE_BOOT_COMPLETED"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.ACCESS_NETWORK_STATE"
 
 [[package.metadata.android.uses_permission]]
 name = "android.permission.INTERNET"

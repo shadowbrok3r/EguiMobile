@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.3.2 — 2026-10-21
+
+Use the shared egui-theme-kit preview gallery for theme selection. Includes searchable preset thumbnails and the central mobile picker fixes, with existing appearance and sizing preferences preserved.
+
+## v0.3.1 — 2026-10-21
+
+Add all 19 desktop theme presets under Settings → Theme presets, with saved appearance, live previews, and preset-aware cards, status colors, update buttons, and glass surfaces.
+
+## 0.3.0 — 2026-10-17
+
+- Public catalog and private invite groups; Sharing controls for administrators; store-owned update checks and notifications for installed apps.
+
+## v0.2.2 — 2026-10-17
+
+Downloads, installer results, and queued updates now continue automatically when the screen is untouched.
+
 ## v0.2.1 — 2026-10-16
 
 egui 0.37: lists scroll with momentum and rubber-band at the ends, and buttons are a little roomier with rounder corners.

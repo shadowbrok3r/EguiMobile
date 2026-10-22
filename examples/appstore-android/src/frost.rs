@@ -7,11 +7,6 @@ use std::time::Duration;
 
 static RENDERER: OnceLock<Option<GrabPassRenderer>> = OnceLock::new();
 
-/// Dark, faintly violet film over the blur.
-const TINT: [u8; 4] = [11, 9, 19, 92];
-const BLUR: f32 = 24.0;
-/// Matches `window_corner_radius`.
-const CORNER: f32 = 8.0;
 /// Panes larger than this fraction of the screen on both axes are scrims, not glass.
 const SCRIM: f32 = 0.9;
 
@@ -32,6 +27,8 @@ fn renderer() -> Option<&'static GrabPassRenderer> {
 
 /// Frost every Foreground/Tooltip pane that was open last frame. Call once per frame.
 pub fn glass_panes(ctx: &egui::Context) {
+    let glass = egui_mobile_theme::glass(ctx);
+    if glass.blur_radius <= 0.0 && glass.tint.a() == 0 { return; }
     let Some(renderer) = renderer() else { return };
 
     let screen = ctx.content_rect();
@@ -59,7 +56,7 @@ pub fn glass_panes(ctx: &egui::Context) {
     } else {
         RepaintPolicy::Bounded(Duration::from_millis(400))
     };
-    let tint = Tint::from_srgb_unmultiplied(TINT);
+    let tint = Tint::from_srgb_unmultiplied(glass.tint.to_srgba_unmultiplied());
 
     egui::Area::new(egui::Id::unique("frost-glass"))
         .order(egui::Order::Middle)
@@ -73,9 +70,9 @@ pub fn glass_panes(ctx: &egui::Context) {
                     ui,
                     Surface {
                         rect,
-                        blur_radius: BlurRadius::new(BLUR),
+                        blur_radius: BlurRadius::new(glass.blur_radius),
                         tint,
-                        corner_radius: CornerRadius::new(CORNER),
+                        corner_radius: CornerRadius::new(glass.corner_radius),
                         presence: Presence::new(1.0),
                         repaint,
                     },

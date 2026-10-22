@@ -6,7 +6,9 @@
 #![cfg_attr(not(target_os = "android"), allow(dead_code))]
 
 mod icons;
+mod job;
 mod theme;
+mod access;
 
 #[cfg(target_os = "android")]
 mod frost;

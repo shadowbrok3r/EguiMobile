@@ -13,6 +13,8 @@
 //! app!(MyApp::new); // → C ABI on iOS, android_main on Android
 //! ```
 
+pub use egui_mobile_theme as theme;
+
 pub use egui_mobile_core::{
     CreateContext, EguiApp, Haptic, Host, Insets, Permission, StylusProbe, egui, keyboard, magnifier, overflow,
     text_gestures,
