@@ -11,6 +11,84 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
     };
 
     ui::card(ui, |ui| {
+        ui::section_title(ui, "Desktop pairing");
+        ui.label(
+            "Paste the pairing code from Privaxy desktop. Pairing is remembered on this device.",
+        );
+        ui.add(
+            egui::TextEdit::singleline(&mut app.pairing_draft)
+                .password(true)
+                .hint_text("Desktop pairing code"),
+        );
+        #[cfg(target_os = "android")]
+        if ui.button("Paste pairing code").clicked() {
+            use egui_mobile::HostExt;
+            match host.clipboard_text() {
+                Some(text) => {
+                    app.pairing_draft = text;
+                    egui_mobile::note_ime_out_of_band_edit();
+                }
+                None => app.notice = Some("Copy a pairing code from desktop first.".into()),
+            }
+        }
+        if ui.button("Pair desktop").clicked() {
+            match crate::proxy::pairing::DesktopPairing::parse(&app.pairing_draft) {
+                Ok(pair) => {
+                    loaded.config.desktop_pairing = Some(pair);
+                    if loaded.config.desktop_enabled {
+                        loaded.restart_proxy();
+                    }
+                    match loaded.save() {
+                        Ok(()) => {
+                            app.pairing_draft.clear();
+                            app.notice = Some("Desktop paired. Enable routing when ready.".into());
+                        }
+                        Err(e) => app.notice = Some(e),
+                    }
+                }
+                Err(e) => app.notice = Some(e),
+            }
+        }
+        if let Some(pair) = &loaded.config.desktop_pairing {
+            ui.label(format!("Paired: {}:{}", pair.host, pair.port));
+            let mut enabled = loaded.config.desktop_enabled;
+            if ui
+                .checkbox(&mut enabled, "Route captured TCP traffic through desktop")
+                .changed()
+            {
+                loaded.config.desktop_enabled = enabled;
+                if let Err(e) = loaded.save() {
+                    app.notice = Some(e);
+                }
+                loaded.restart_proxy();
+            }
+            ui.label("Enable Capture all apps on Dashboard. Requests and inspection appear on desktop. Install the desktop CA for HTTPS inspection; DNS and other UDP remain direct. If desktop is unavailable, TCP fails rather than bypassing it.");
+            if ui.button("Forget desktop").clicked() {
+                loaded.config.desktop_enabled = false;
+                loaded.config.desktop_pairing = None;
+                if let Err(e) = loaded.save() {
+                    app.notice = Some(e);
+                }
+                loaded.restart_proxy();
+            }
+        }
+    });
+    ui.add_space(10.0);
+
+    ui::card(ui, |ui| {
+        if egui_mobile::theme::editor(
+            ui,
+            &mut loaded.config.appearance,
+            egui_mobile::theme::Density::Touch,
+        ) {
+            if let Err(error) = loaded.save() {
+                app.notice = Some(error);
+            }
+        }
+    });
+    ui.add_space(10.0);
+
+    ui::card(ui, |ui| {
         ui::section_title(ui, "Listener");
         ui.add_space(8.0);
 
@@ -107,7 +185,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                  reclaims the process once the app is backgrounded, and the proxy goes with it.",
             )
             .size(12.0)
-            .color(ui::MUTED),
+            .color(ui.visuals().weak_text_color()),
         );
 
         ui.add_space(8.0);
@@ -139,7 +217,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                  makes apps fall back to TCP, where the proxy sees the traffic.",
             )
             .size(12.0)
-            .color(ui::MUTED),
+            .color(ui.visuals().weak_text_color()),
         );
 
         ui.add_space(8.0);
@@ -159,7 +237,9 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                 loaded.start_capture();
                 app.notice = Some(String::from("Capture restarted."));
             } else {
-                app.notice = Some(String::from("Saved. These apply the next time capture starts."));
+                app.notice = Some(String::from(
+                    "Saved. These apply the next time capture starts.",
+                ));
             }
             host.haptic(Haptic::Success);
         }
@@ -177,10 +257,10 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
             } else if *certificate == crate::certificate::CertificateStatus::Installed {
                 ui::GOOD
             } else {
-                ui::MUTED
+                ui.visuals().weak_text_color()
             },
         ));
-        ui.label(egui::RichText::new("Installation is checked for this Android profile. Each client app still chooses which CAs it trusts; actual rejections appear in Requests > Failed.").size(12.0).color(ui::MUTED));
+        ui.label(egui::RichText::new("Installation is checked for this Android profile. Each client app still chooses which CAs it trusts; actual rejections appear in Requests > Failed.").size(12.0).color(ui.visuals().weak_text_color()));
         if ui.button("Check certificate again").clicked() {
             loaded.certificate_check.invalidate();
             loaded.certificate_check.update(&loaded.config.ca);
@@ -194,11 +274,15 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                  privaxy-ca.crt from Downloads.",
             )
             .size(12.0)
-            .color(ui::MUTED),
+            .color(ui.visuals().weak_text_color()),
         );
 
         ui.add_space(8.0);
-        ui.label(egui::RichText::new("SHA-256").size(11.0).color(ui::MUTED));
+        ui.label(
+            egui::RichText::new("SHA-256")
+                .size(11.0)
+                .color(ui.visuals().weak_text_color()),
+        );
         ui.label(
             egui::RichText::new(ui::elide(&loaded.config.ca.fingerprint(), 60))
                 .size(10.0)
@@ -279,7 +363,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                  not trust the certificate. Never intercept wins if a host is on both lists.",
             )
             .size(12.0)
-            .color(ui::MUTED),
+            .color(ui.visuals().weak_text_color()),
         );
         ui.add_space(6.0);
 
@@ -301,7 +385,10 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
             }
             ui::chips::Action::Removed(entry) => {
                 loaded.set_intercepts(
-                    intercepts.into_iter().filter(|item| item != &entry).collect(),
+                    intercepts
+                        .into_iter()
+                        .filter(|item| item != &entry)
+                        .collect(),
                 );
             }
             ui::chips::Action::None => {}
@@ -319,7 +406,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                  is what certificate-pinned apps need.",
             )
             .size(12.0)
-            .color(ui::MUTED),
+            .color(ui.visuals().weak_text_color()),
         );
         ui.add_space(6.0);
 
@@ -341,7 +428,10 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
             }
             ui::chips::Action::Removed(entry) => {
                 loaded.set_exclusions(
-                    exclusions.into_iter().filter(|item| item != &entry).collect(),
+                    exclusions
+                        .into_iter()
+                        .filter(|item| item != &entry)
+                        .collect(),
                 );
             }
             ui::chips::Action::None => {}
@@ -357,7 +447,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
             egui::RichText::new(loaded.paths.root.to_string_lossy())
                 .size(10.0)
                 .monospace()
-                .color(ui::MUTED),
+                .color(ui.visuals().weak_text_color()),
         );
     });
 

@@ -104,7 +104,12 @@ fn default_filters() -> Vec<Filter> {
     use FilterGroup::*;
 
     vec![
-        Filter::new(true, "EasyList", Ads, "https://easylist.to/easylist/easylist.txt"),
+        Filter::new(
+            true,
+            "EasyList",
+            Ads,
+            "https://easylist.to/easylist/easylist.txt",
+        ),
         Filter::new(
             true,
             "EasyPrivacy",
@@ -225,8 +230,14 @@ fn default_filters() -> Vec<Filter> {
     ]
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub desktop_pairing: Option<super::pairing::DesktopPairing>,
+    #[serde(default)]
+    pub desktop_enabled: bool,
+    #[serde(default)]
+    pub appearance: egui_mobile::theme::ThemeConfig,
     pub listen_port: u16,
     /// Bind 0.0.0.0 instead of 127.0.0.1, letting other devices on the network use the phone as
     /// their proxy. Off by default — an open proxy on a shared network is a liability.
@@ -286,6 +297,9 @@ fn default_vpn_dns() -> String {
 impl Config {
     fn new(ca: CertAuthority) -> Self {
         Self {
+            desktop_pairing: None,
+            desktop_enabled: false,
+            appearance: Default::default(),
             listen_port: 8100,
             share_on_network: false,
             // Works on an unmodified device with nothing installed, so it is what a first run gets.

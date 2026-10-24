@@ -380,3 +380,38 @@ fn connection_nominated_headers_are_removed_but_trailer_support_survives() {
     assert_eq!(headers[header::TE], "trailers");
     assert_eq!(headers["x-end-to-end"], "keep me");
 }
+
+#[tokio::test]
+async fn full_inspection_allows_connect_before_blocking_the_inner_request() {
+    for h2 in [false, true] {
+        let fixture = Harness::new(h2).await;
+        fixture.session.engine.replace(&["||localhost^".into()]);
+        let response = fixture
+            .client
+            .get(format!("{}/blocked-path", fixture.origin))
+            .header("x-capture-proof", "inner-request")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let events = fixture.session.state.recent_events(100);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.method == "CONNECT" && matches!(e.kind, EventKind::Intercepted))
+        );
+        let request = events
+            .iter()
+            .find(|e| e.method == "GET")
+            .expect("inner request was captured");
+        assert!(request.url.ends_with("/blocked-path"));
+        let exchange = request.exchange.lock().unwrap();
+        assert_eq!(exchange.status, Some(403));
+        assert!(
+            exchange
+                .request_headers
+                .iter()
+                .any(|(k, v)| k == "x-capture-proof" && v == "inner-request")
+        );
+    }
+}

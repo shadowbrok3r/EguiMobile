@@ -103,7 +103,12 @@ impl Loaded {
         }
 
         let rule = format!("||{target}^");
-        if self.config.custom_filters.iter().any(|existing| existing == &rule) {
+        if self
+            .config
+            .custom_filters
+            .iter()
+            .any(|existing| existing == &rule)
+        {
             return None;
         }
         self.config.custom_filters.push(rule.clone());
@@ -130,7 +135,12 @@ impl Loaded {
             return None;
         }
         let rule = format!("@@||{target}^");
-        if self.config.custom_filters.iter().any(|existing| existing == &rule) {
+        if self
+            .config
+            .custom_filters
+            .iter()
+            .any(|existing| existing == &rule)
+        {
             return None;
         }
         let mut next = self.config.custom_filters.clone();
@@ -142,7 +152,10 @@ impl Loaded {
     pub fn is_allowed(&self, target: &str) -> bool {
         let target = target.split(':').next().unwrap_or_default();
         let rule = format!("@@||{target}^");
-        self.config.custom_filters.iter().any(|existing| existing == &rule)
+        self.config
+            .custom_filters
+            .iter()
+            .any(|existing| existing == &rule)
     }
 
     /// Replaces the custom rule set and rebuilds the engine from the cached lists.
@@ -161,7 +174,9 @@ impl Loaded {
     /// Removes a previously added rule. Returns whether one went away.
     pub fn unblock(&mut self, rule: &str) -> bool {
         let before = self.config.custom_filters.len();
-        self.config.custom_filters.retain(|existing| existing != rule);
+        self.config
+            .custom_filters
+            .retain(|existing| existing != rule);
         if self.config.custom_filters.len() == before {
             return false;
         }
@@ -207,7 +222,10 @@ impl Loaded {
     pub fn is_blocked(&self, target: &str) -> bool {
         let target = target.split(':').next().unwrap_or_default();
         let rule = format!("||{target}^");
-        self.config.custom_filters.iter().any(|existing| existing == &rule)
+        self.config
+            .custom_filters
+            .iter()
+            .any(|existing| existing == &rule)
     }
 }
 
@@ -217,6 +235,7 @@ pub struct PrivaxyApp {
     pub tab: Tab,
 
     // Text buffers the settings and filter screens edit, flushed into the config on save.
+    pub pairing_draft: String,
     pub port_text: String,
     pub vpn_dns_text: String,
     pub exclusions_draft: String,
@@ -301,6 +320,7 @@ impl PrivaxyApp {
             loaded: None,
             init_error: None,
             tab: Tab::Dashboard,
+            pairing_draft: String::new(),
             port_text: String::new(),
             vpn_dns_text: String::new(),
             exclusions_draft: String::new(),
@@ -381,7 +401,7 @@ impl PrivaxyApp {
                 egui::RichText::new("Privaxy")
                     .size(16.0)
                     .strong()
-                    .color(ui::ACCENT),
+                    .color(ui.visuals().hyperlink_color),
             );
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -416,10 +436,10 @@ impl PrivaxyApp {
                     crate::vpn::VpnStatus::Starting => ("• Starting", ui::WARN),
                     crate::vpn::VpnStatus::Failed(_) => ("• Capture failed", ui::BAD),
                     crate::vpn::VpnStatus::Off => match loaded.state.status() {
-                        Status::Running { .. } => ("• Proxy only", ui::MUTED),
+                        Status::Running { .. } => ("• Proxy only", ui.visuals().weak_text_color()),
                         Status::Starting => ("• Starting", ui::WARN),
                         Status::Failed(_) => ("• Failed", ui::BAD),
-                        Status::Stopped => ("• Stopped", ui::MUTED),
+                        Status::Stopped => ("• Stopped", ui.visuals().weak_text_color()),
                     },
                 };
                 ui.label(egui::RichText::new(text).size(12.0).color(color));
@@ -434,10 +454,15 @@ impl PrivaxyApp {
             for tab in Tab::ALL {
                 let selected = self.tab == tab;
                 // White on the violet chip, not violet on violet — the latter was 2:1.
-                let text = egui::RichText::new(tab.label())
-                    .size(13.0)
-                    .strong()
-                    .color(if selected { ui::ON_ACCENT } else { ui::MUTED });
+                let text =
+                    egui::RichText::new(tab.label())
+                        .size(13.0)
+                        .strong()
+                        .color(if selected {
+                            ui::ON_ACCENT
+                        } else {
+                            ui.visuals().weak_text_color()
+                        });
 
                 if ui
                     .add_sized(
@@ -503,7 +528,13 @@ impl PrivaxyApp {
         self.poll_file_job(host);
         // Redundant since egui-android's `run_with` started calling `EguiApp::theme` before the
         // first frame; kept because it is idempotent and the backdrop below has to run per frame.
-        ui::apply_theme(ui.ctx());
+        self.ensure_loaded(host);
+        if let Some(loaded) = &self.loaded {
+            loaded
+                .config
+                .appearance
+                .apply(ui.ctx(), egui_mobile::theme::Density::Touch);
+        }
         ui::paint_backdrop(ui.ctx());
         // Before anything paints into the chrome rects — the grab-pass blurs whatever is already
         // in the framebuffer where it lands.
@@ -564,7 +595,10 @@ impl PrivaxyApp {
                     ui.vertical_centered(|ui| {
                         ui.add_space(40.0);
                         ui.spinner();
-                        ui.label(egui::RichText::new("Opening storage…").color(ui::MUTED));
+                        ui.label(
+                            egui::RichText::new("Opening storage…")
+                                .color(ui.visuals().weak_text_color()),
+                        );
                     });
                     return;
                 }
@@ -582,10 +616,7 @@ impl PrivaxyApp {
                         );
                         ui.add_space(8.0);
                         if ui
-                            .add_sized(
-                                [ui.available_width(), 34.0],
-                                egui::Button::new("Dismiss"),
-                            )
+                            .add_sized([ui.available_width(), 34.0], egui::Button::new("Dismiss"))
                             .clicked()
                         {
                             self.notice = None;

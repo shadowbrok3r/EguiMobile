@@ -34,7 +34,11 @@ pub enum InspectTab {
 }
 
 impl InspectTab {
-    const ALL: [InspectTab; 3] = [InspectTab::Overview, InspectTab::Request, InspectTab::Response];
+    const ALL: [InspectTab; 3] = [
+        InspectTab::Overview,
+        InspectTab::Request,
+        InspectTab::Response,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -137,7 +141,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
             ui.label(
                 egui::RichText::new("This request is no longer in the capture.")
                     .size(13.0)
-                    .color(ui::MUTED),
+                    .color(ui.visuals().weak_text_color()),
             );
         });
         if ui::big_button(ui, "Back", ui::ACCENT_FILL).clicked() {
@@ -221,8 +225,8 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
         } else {
             match &event.kind {
                 EventKind::Blocked { .. } => ("BLOCKED", ui::BAD),
-                EventKind::Tunneled => ("TUNNELED", ui::MUTED),
-                EventKind::Intercepted => ("TLS", ui::ACCENT),
+                EventKind::Tunneled => ("TUNNELED", ui.visuals().weak_text_color()),
+                EventKind::Intercepted => ("TLS", ui.visuals().hyperlink_color),
                 EventKind::Proxied => ("PROXIED", ui::GOOD),
             }
         };
@@ -231,7 +235,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
             egui::RichText::new(&event.method)
                 .size(10.0)
                 .strong()
-                .color(ui::MUTED),
+                .color(ui.visuals().weak_text_color()),
         );
         if let Some(status) = event.exchange.lock().ok().and_then(|open| open.status) {
             ui.label(
@@ -242,8 +246,12 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
             );
         }
         ui.add(
-            egui::Label::new(egui::RichText::new(event.host()).size(11.0).color(ui::TEXT))
-                .truncate(),
+            egui::Label::new(
+                egui::RichText::new(event.host())
+                    .size(11.0)
+                    .color(ui.visuals().text_color()),
+            )
+            .truncate(),
         );
     });
     ui.add(
@@ -251,7 +259,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
             egui::RichText::new(event.path())
                 .size(10.0)
                 .monospace()
-                .color(ui::MUTED),
+                .color(ui.visuals().weak_text_color()),
         )
         .truncate(),
     );
@@ -267,7 +275,11 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
             let text = egui::RichText::new(tab.label())
                 .size(13.0)
                 .strong()
-                .color(if selected { ui::ON_ACCENT } else { ui::MUTED });
+                .color(if selected {
+                    ui::ON_ACCENT
+                } else {
+                    ui.visuals().weak_text_color()
+                });
             if ui
                 .add_sized([width, 38.0], egui::Button::selectable(selected, text))
                 .clicked()
@@ -460,7 +472,9 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
         match app.loaded.as_ref().and_then(|loaded| loaded.proxy.as_ref()) {
             Some(proxy) => {
                 proxy.replay(method, url, headers, body);
-                app.notice = Some(String::from("Replayed — the new row is at the top of the log."));
+                app.notice = Some(String::from(
+                    "Replayed — the new row is at the top of the log.",
+                ));
                 host.haptic(Haptic::Success);
             }
             None => app.notice = Some(String::from("Start the proxy to replay a request.")),
@@ -480,11 +494,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
         }
     }
     if toggle_intercept || toggle_exclusion {
-        let bare = host_target
-            .split(':')
-            .next()
-            .unwrap_or_default()
-            .to_owned();
+        let bare = host_target.split(':').next().unwrap_or_default().to_owned();
         if let Some(loaded) = app.loaded.as_mut() {
             if toggle_intercept {
                 let mut list: Vec<String> = loaded.config.intercepts.iter().cloned().collect();
@@ -606,15 +616,29 @@ fn overview(event: &RequestEvent, ui: &mut egui::Ui) {
     if let Some(note) = &exchange.note {
         ui.add_space(8.0);
         ui::card(ui, |ui| {
-            ui.label(egui::RichText::new(note).size(12.0).color(ui::MUTED));
+            ui.label(
+                egui::RichText::new(note)
+                    .size(12.0)
+                    .color(ui.visuals().weak_text_color()),
+            );
         });
     }
 }
 
 /// Headers and Body as two collapsible panes that share the remaining height: collapse either and
 /// the other takes the space.
-fn sides(app: &mut PrivaxyApp, event: &RequestEvent, ui: &mut egui::Ui, host: &Host, request: bool) {
-    let salt_headers = if request { "req_headers" } else { "res_headers" };
+fn sides(
+    app: &mut PrivaxyApp,
+    event: &RequestEvent,
+    ui: &mut egui::Ui,
+    host: &Host,
+    request: bool,
+) {
+    let salt_headers = if request {
+        "req_headers"
+    } else {
+        "res_headers"
+    };
     let salt_body = if request { "req_body" } else { "res_body" };
 
     let (headers, trailers, note) = match event.exchange.lock() {
@@ -681,7 +705,7 @@ fn sides(app: &mut PrivaxyApp, event: &RequestEvent, ui: &mut egui::Ui, host: &H
                                     None => "No response came back.",
                                 })
                                 .size(12.0)
-                                .color(ui::MUTED),
+                                .color(ui.visuals().weak_text_color()),
                             );
                         });
                         return;
@@ -760,7 +784,7 @@ fn sides(app: &mut PrivaxyApp, event: &RequestEvent, ui: &mut egui::Ui, host: &H
                                     ui::format_bytes(body.len)
                                 ))
                                 .size(10.0)
-                                .color(ui::MUTED),
+                                .color(ui.visuals().weak_text_color()),
                             );
                         }
                         if body.seen == 0 {
@@ -844,7 +868,7 @@ fn sides(app: &mut PrivaxyApp, event: &RequestEvent, ui: &mut egui::Ui, host: &H
                                         body.len
                                     ))
                                     .size(10.0)
-                                    .color(ui::MUTED),
+                                    .color(ui.visuals().weak_text_color()),
                                 );
                                 let text = page_text(&data.bytes, offset > 0)
                                     .unwrap_or_else(|| hex_dump_at(&data.bytes, offset));
@@ -949,7 +973,7 @@ fn section(
                 egui::RichText::new(title.to_uppercase())
                     .size(11.0)
                     .strong()
-                    .color(ui::MUTED),
+                    .color(ui.visuals().weak_text_color()),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Right-to-left, so this insets from the screen edge rather than the label.
@@ -969,8 +993,9 @@ fn section(
 
 /// The recessed pane the monospace content sits in.
 fn well<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    let mut frame = ui::glass_frame(ui::WELL).inner_margin(egui::Margin::same(10));
-    frame.stroke = egui::Stroke::new(1.0, ui::HAIRLINE);
+    let mut frame =
+        ui::glass_frame(ui.visuals().extreme_bg_color).inner_margin(egui::Margin::same(10));
+    frame.stroke = egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
     frame
         .show(ui, |ui| {
             ui.set_width(ui.available_width());

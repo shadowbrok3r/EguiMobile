@@ -32,7 +32,11 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                 ui.label(egui::RichText::new(error).size(12.0).color(ui::WARN));
             }
             FiltersStatus::Idle => {
-                ui.label(egui::RichText::new("Not loaded").size(13.0).color(ui::MUTED));
+                ui.label(
+                    egui::RichText::new("Not loaded")
+                        .size(13.0)
+                        .color(ui.visuals().weak_text_color()),
+                );
             }
         }
 
@@ -55,7 +59,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
             }
 
             let apply = egui::Button::new("Apply changes").fill(if app.filters_dirty {
-                ui::ACCENT
+                ui.visuals().hyperlink_color
             } else {
                 ui.visuals().widgets.inactive.bg_fill
             });
@@ -120,7 +124,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                 "Blocks the domain and every subdomain, in both interception modes.",
             )
             .size(12.0)
-            .color(ui::MUTED),
+            .color(ui.visuals().weak_text_color()),
         );
         ui.add_space(6.0);
 
@@ -170,9 +174,11 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
         ui::section_title(ui, "Custom rules");
         ui.add_space(6.0);
         ui.label(
-            egui::RichText::new("Tap a rule to remove it. Blocking a host from the log adds one here.")
-                .size(12.0)
-                .color(ui::MUTED),
+            egui::RichText::new(
+                "Tap a rule to remove it. Blocking a host from the log adds one here.",
+            )
+            .size(12.0)
+            .color(ui.visuals().weak_text_color()),
         );
         ui.add_space(6.0);
 

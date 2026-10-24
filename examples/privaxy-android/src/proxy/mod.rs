@@ -8,6 +8,7 @@ pub mod cert;
 pub mod config;
 pub mod exclusions;
 pub mod har;
+pub mod pairing;
 pub mod session;
 pub mod state;
 pub mod storage;
@@ -49,6 +50,12 @@ impl ProxyHandle {
     /// Spawns the runtime and starts listening. Failures land in [`ProxyState::status`] rather than
     /// propagating, so the UI can show them.
     pub fn start(config: &Config, paths: Paths, state: Arc<ProxyState>) -> Self {
+        if config.desktop_enabled && config.desktop_pairing.is_none() {
+            state.set_status(Status::Failed(
+                "Desktop routing is enabled but no pairing is saved.".into(),
+            ));
+            return Self::stopped(state, paths);
+        }
         state.set_status(Status::Starting);
         state.set_mode(config.mode);
 
@@ -105,7 +112,18 @@ impl ProxyHandle {
         );
         let share_on_network = config.share_on_network;
 
-        runtime.spawn(serve(session, bind_address, share_on_network, shutdown_rx, state.clone()));
+        let desktop = config
+            .desktop_enabled
+            .then(|| config.desktop_pairing.clone())
+            .flatten();
+        runtime.spawn(serve(
+            desktop,
+            session,
+            bind_address,
+            share_on_network,
+            shutdown_rx,
+            state.clone(),
+        ));
 
         let subscriptions: Subscriptions = Arc::new(std::sync::Mutex::new((
             config.filters.clone(),
@@ -203,7 +221,9 @@ impl ProxyHandle {
             for (name, value) in &headers {
                 // Hop-by-hop headers describe the old connection; content-length is recomputed.
                 let lowered = name.to_ascii_lowercase();
-                if session::HOP_BY_HOP_HEADERS.contains(&lowered.as_str()) || lowered == "content-length" {
+                if session::HOP_BY_HOP_HEADERS.contains(&lowered.as_str())
+                    || lowered == "content-length"
+                {
                     continue;
                 }
                 request = request.header(name, value);
@@ -305,6 +325,7 @@ impl Drop for ProxyHandle {
 }
 
 async fn serve(
+    desktop: Option<pairing::DesktopPairing>,
     session: Arc<Session>,
     bind_address: SocketAddr,
     share_on_network: bool,
@@ -352,9 +373,25 @@ async fn serve(
         }
         connections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+        let desktop = desktop.clone();
+        let relay_state = state.clone();
         let session = session.clone();
         let connections = connections.clone();
         tokio::spawn(async move {
+            if let Some(desktop) = desktop {
+                if let Err(error) = desktop.relay(stream).await {
+                    let exchange = relay_state.record(state::RequestEvent::now(
+                        "RELAY",
+                        "https://privaxy-desktop/",
+                        state::EventKind::Tunneled,
+                    ));
+                    if let Ok(mut e) = exchange.lock() {
+                        e.error = Some(error);
+                    }
+                }
+                connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
             let service = hyper::service::service_fn(move |request| {
                 session::handle(session.clone(), request)
             });
@@ -447,7 +484,10 @@ async fn load_filters(
     state: Arc<ProxyState>,
     force: bool,
 ) {
-    let enabled: Vec<Filter> = filters.into_iter().filter(|filter| filter.enabled).collect();
+    let enabled: Vec<Filter> = filters
+        .into_iter()
+        .filter(|filter| filter.enabled)
+        .collect();
     let total = enabled.len();
     state.set_filters_status(FiltersStatus::Updating {
         completed: 0,

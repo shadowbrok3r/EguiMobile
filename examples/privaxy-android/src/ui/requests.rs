@@ -252,6 +252,10 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
     let Some(state) = app.loaded.as_ref().map(|loaded| loaded.state.clone()) else {
         return;
     };
+    let desktop_routing = app.loaded.as_ref().is_some_and(|loaded| loaded.config.desktop_enabled);
+    if desktop_routing {
+        ui.label("Desktop routing is enabled. Open Requests on desktop for captured URLs and inspection; relay failures appear here.");
+    }
     let mut refresh = false;
     let mut save = false;
     let width = ui.available_width();
@@ -369,7 +373,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                 }
             ))
             .size(10.0)
-            .color(ui::MUTED),
+            .color(ui.visuals().weak_text_color()),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui::icons::button(
@@ -390,7 +394,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                     "".to_owned()
                 })
                 .size(11.0)
-                .color(ui::ACCENT),
+                .color(ui.visuals().hyperlink_color),
             );
         });
     });
@@ -415,7 +419,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                 ui::format_bytes(state.stored_bytes())
             ))
             .size(10.0)
-            .color(ui::MUTED),
+            .color(ui.visuals().weak_text_color()),
         );
     }
     let pages = app.request_view.rows.len().div_ceil(ROWS_PER_PAGE).max(1);
@@ -467,7 +471,7 @@ fn show_rows(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                     "No requests yet. Turn on capture, or point a device at the proxy, and browse."
                 })
                 .size(13.0)
-                .color(ui::MUTED),
+                .color(ui.visuals().weak_text_color()),
             );
             if narrowed {
                 reset = ui.button("Clear search and filters").clicked();
@@ -567,7 +571,11 @@ fn save_capture(app: &mut PrivaxyApp, host: &Host) {
 
 fn filter_panel(filters: &mut RequestFilters, ui: &mut egui::Ui) {
     ui::card(ui, |ui| {
-        ui.label(egui::RichText::new("OUTCOME").size(10.0).color(ui::MUTED));
+        ui.label(
+            egui::RichText::new("OUTCOME")
+                .size(10.0)
+                .color(ui.visuals().weak_text_color()),
+        );
         ui.horizontal_wrapped(|ui| {
             for option in KindFilter::ALL {
                 if ui
@@ -580,7 +588,11 @@ fn filter_panel(filters: &mut RequestFilters, ui: &mut egui::Ui) {
         });
 
         ui.add_space(6.0);
-        ui.label(egui::RichText::new("STATUS").size(10.0).color(ui::MUTED));
+        ui.label(
+            egui::RichText::new("STATUS")
+                .size(10.0)
+                .color(ui.visuals().weak_text_color()),
+        );
         ui.horizontal_wrapped(|ui| {
             for option in StatusFilter::ALL {
                 if ui
@@ -593,7 +605,11 @@ fn filter_panel(filters: &mut RequestFilters, ui: &mut egui::Ui) {
         });
 
         ui.add_space(6.0);
-        ui.label(egui::RichText::new("METHOD").size(10.0).color(ui::MUTED));
+        ui.label(
+            egui::RichText::new("METHOD")
+                .size(10.0)
+                .color(ui.visuals().weak_text_color()),
+        );
         ui.horizontal_wrapped(|ui| {
             for option in ["", "GET", "POST", "CONNECT", "PUT", "DELETE"] {
                 let label = if option.is_empty() { "Any" } else { option };
@@ -607,7 +623,11 @@ fn filter_panel(filters: &mut RequestFilters, ui: &mut egui::Ui) {
         });
 
         ui.add_space(6.0);
-        ui.label(egui::RichText::new("SORT").size(10.0).color(ui::MUTED));
+        ui.label(
+            egui::RichText::new("SORT")
+                .size(10.0)
+                .color(ui.visuals().weak_text_color()),
+        );
         ui.horizontal_wrapped(|ui| {
             for option in RequestSort::ALL {
                 if ui
@@ -681,10 +701,7 @@ fn collect(events: Vec<RequestEvent>, query: &str, filters: &RequestFilters) -> 
             if !filters.status.accepts(status) {
                 return None;
             }
-            if !query.is_empty()
-                && !event.url.to_lowercase().contains(query)
-                && !matches_headers
-            {
+            if !query.is_empty() && !event.url.to_lowercase().contains(query) && !matches_headers {
                 return None;
             }
 
@@ -718,8 +735,8 @@ fn row_card(row: &Row, blocked: bool, ui: &mut egui::Ui) -> RowAction {
     } else {
         match &row.event.kind {
             EventKind::Blocked { .. } => ("BLOCK", ui::BAD),
-            EventKind::Tunneled => ("TUNNEL", ui::MUTED),
-            EventKind::Intercepted => ("TLS", ui::ACCENT),
+            EventKind::Tunneled => ("TUNNEL", ui.visuals().weak_text_color()),
+            EventKind::Intercepted => ("TLS", ui.visuals().hyperlink_color),
             EventKind::Proxied => ("PROXY", ui::GOOD),
         }
     };
@@ -731,18 +748,18 @@ fn row_card(row: &Row, blocked: bool, ui: &mut egui::Ui) -> RowAction {
                 ui.label(
                     egui::RichText::new(format!("{version:?}"))
                         .size(10.0)
-                        .color(ui::MUTED),
+                        .color(ui.visuals().weak_text_color()),
                 );
             }
             ui.label(
                 egui::RichText::new(row.event.at.format("%H:%M:%S").to_string())
                     .size(10.0)
-                    .color(ui::MUTED),
+                    .color(ui.visuals().weak_text_color()),
             );
             ui.label(
                 egui::RichText::new(&row.event.method)
                     .size(10.0)
-                    .color(ui::MUTED),
+                    .color(ui.visuals().weak_text_color()),
             );
             if let Some(status) = row.status {
                 ui.label(
@@ -756,14 +773,14 @@ fn row_card(row: &Row, blocked: bool, ui: &mut egui::Ui) -> RowAction {
                 ui.label(
                     egui::RichText::new(ui::format_bytes(row.bytes))
                         .size(10.0)
-                        .color(ui::MUTED),
+                        .color(ui.visuals().weak_text_color()),
                 );
             }
             if let Some(millis) = row.millis {
                 ui.label(
                     egui::RichText::new(format!("{millis} ms"))
                         .size(10.0)
-                        .color(ui::MUTED),
+                        .color(ui.visuals().weak_text_color()),
                 );
             }
         });
@@ -776,7 +793,7 @@ fn row_card(row: &Row, blocked: bool, ui: &mut egui::Ui) -> RowAction {
         ui.label(
             egui::RichText::new(ui::elide(row.event.path(), 60))
                 .size(11.0)
-                .color(ui::MUTED),
+                .color(ui.visuals().weak_text_color()),
         );
 
         if let EventKind::Blocked { filter } = &row.event.kind {
@@ -806,7 +823,7 @@ fn row_card(row: &Row, blocked: bool, ui: &mut egui::Ui) -> RowAction {
                 .add_sized(
                     [44.0, 32.0],
                     egui::Button::new(egui::RichText::new("🚫").size(13.0).color(if blocked {
-                        ui::MUTED
+                        ui.visuals().weak_text_color()
                     } else {
                         ui::BAD
                     })),

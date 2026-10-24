@@ -81,18 +81,6 @@ fn handle_connect(
     let host = authority.host().to_owned();
     let logged_url = format!("https://{authority}/");
 
-    if let Some(filter) = session.engine.check_host(&host) {
-        session.state.record(
-            RequestEvent::now("CONNECT", &logged_url, EventKind::Blocked { filter }).note(
-                "Refused as the tunnel opened, on the hostname alone. Nothing was sent, so there \
-                 are no headers or body to show.",
-            ),
-        );
-        // Refusing the tunnel surfaces as a failed connection in the client, which is what an
-        // ad request should look like.
-        return message_response(StatusCode::FORBIDDEN, "Blocked by Privaxy.");
-    }
-
     // Never-intercept always wins: it is the safety valve for pinned apps, so a host on both
     // lists stays tunnelled. Otherwise the intercept list terminates a host that hostname-only
     // mode would have passed through — picking a few hosts rather than switching the whole device
@@ -105,6 +93,20 @@ fn handle_connect(
     let tunnel_only = excluded
         || other_protocol
         || (session.state.mode() == MitmMode::HostnameOnly && !intercepted);
+
+    // Inspected connections must negotiate TLS first: apply URL rules to the inner
+    // request, where path, headers and content type are available.
+    if tunnel_only && let Some(filter) = session.engine.check_host(&host) {
+        session.state.record(
+            RequestEvent::now("CONNECT", &logged_url, EventKind::Blocked { filter }).note(
+                "Refused as the tunnel opened, on the hostname alone. Nothing was sent, so there \
+                 are no headers or body to show.",
+            ),
+        );
+        // Refusing the tunnel surfaces as a failed connection in the client, which is what an
+        // ad request should look like.
+        return message_response(StatusCode::FORBIDDEN, "Blocked by Privaxy.");
+    }
 
     // Every HTTPS connection produces one of these rows, so labelling matters: an intercepted
     // CONNECT used to be recorded as "tunneled" with a note saying TLS was *not* terminated —
@@ -254,9 +256,7 @@ async fn intercept_tls<T>(
     let service = service_fn(move |request| {
         let session = session.clone();
         let authority = authority.clone();
-        async move {
-            Ok::<_, Infallible>(forward(session, request, authority, Scheme::HTTPS).await)
-        }
+        async move { Ok::<_, Infallible>(forward(session, request, authority, Scheme::HTTPS).await) }
     });
 
     let result = if http2 {
@@ -359,6 +359,7 @@ async fn forward(
             .note("Blocked before the request left the phone, so there is no response to show."),
         );
         if let Ok(mut exchange) = exchange.lock() {
+            exchange.status = Some(403);
             exchange.request_headers = header_pairs(request.headers());
             exchange.request_version = Some(request.version());
             exchange.finished_at = Some(chrono::Local::now());
@@ -487,7 +488,12 @@ async fn upgrade_through(
     // partly visible in the log — it is absent. The frames themselves are opaque once joined,
     // which the note says.
     let exchange = session.state.record(
-        RequestEvent::now(request.method().as_str(), &uri.to_string(), EventKind::Proxied).note(
+        RequestEvent::now(
+            request.method().as_str(),
+            &uri.to_string(),
+            EventKind::Proxied,
+        )
+        .note(
             "Protocol upgrade — the connection is joined end to end after the handshake, so the \
              frames are not logged.",
         ),
@@ -530,13 +536,11 @@ async fn upgrade_through(
         };
     tokio::spawn(connection.with_upgrades());
 
-    let mut upstream_request = Request::builder()
-        .method(request.method().clone())
-        .uri(
-            uri.path_and_query()
-                .map(|path| path.as_str())
-                .unwrap_or("/"),
-        );
+    let mut upstream_request = Request::builder().method(request.method().clone()).uri(
+        uri.path_and_query()
+            .map(|path| path.as_str())
+            .unwrap_or("/"),
+    );
     if let Some(headers) = upstream_request.headers_mut() {
         *headers = request.headers().clone();
     }

@@ -32,7 +32,11 @@ pub fn editor(
     let mut action = Action::None;
 
     if entries.is_empty() {
-        ui.label(egui::RichText::new(empty).size(12.0).color(ui::MUTED));
+        ui.label(
+            egui::RichText::new(empty)
+                .size(12.0)
+                .color(ui.visuals().weak_text_color()),
+        );
     } else {
         // horizontal_wrapped so a long list flows onto as many rows as it needs instead of
         // running off the screen edge.
@@ -83,9 +87,16 @@ pub fn editor(
 fn chip(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let label = format!("{}  \u{2716}", ui::elide(text, 26));
     ui.add(
-        egui::Button::new(egui::RichText::new(label).size(12.0).color(ui::TEXT))
-            .fill(ui::GLASS_RAISED)
-            .stroke(egui::Stroke::new(1.0, ui::HAIRLINE))
-            .corner_radius(egui::CornerRadius::same(ui::RADIUS)),
+        egui::Button::new(
+            egui::RichText::new(label)
+                .size(12.0)
+                .color(ui.visuals().text_color()),
+        )
+        .fill(ui.visuals().window_fill)
+        .stroke(egui::Stroke::new(
+            1.0,
+            ui.visuals().widgets.noninteractive.bg_stroke.color,
+        ))
+        .corner_radius(egui::CornerRadius::same(ui::RADIUS)),
     )
 }

@@ -9,7 +9,7 @@ pub mod inspect;
 pub mod requests;
 pub mod settings;
 
-use egui::{Color32, CornerRadius, Frame, Margin, Response, RichText, Stroke, Ui, Vec2};
+use egui::{Color32, CornerRadius, Frame, Margin, Response, RichText, Stroke, Ui};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -170,119 +170,24 @@ pub fn open_security_settings(host: &egui_mobile::Host) {
     let _ = host;
 }
 
-/// Installs the palette. Called from `update`, because Android never invokes `EguiApp::theme` —
-/// `egui-android` has no `.theme(..)` call, so everything here was dead until now.
-///
-/// Written into *both* theme slots and then pinned to dark: `set_visuals` only touches the
-/// currently active theme, so a device reporting light would otherwise keep stock egui styling.
+/// Install the shared default before persisted appearance settings are loaded.
 pub fn apply_theme(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
-
-    // Panels stay transparent so the backdrop gradient shows through them.
-    visuals.panel_fill = Color32::TRANSPARENT;
-    visuals.window_fill = GLASS_RAISED;
-    visuals.window_stroke = Stroke::new(1.0, HAIRLINE);
-    visuals.extreme_bg_color = WELL;
-    visuals.faint_bg_color = GLASS;
-    visuals.override_text_color = Some(TEXT);
-    visuals.hyperlink_color = ACCENT;
-    visuals.warn_fg_color = WARN;
-    visuals.error_fg_color = BAD;
-    visuals.selection.bg_fill = ACCENT_FILL;
-    visuals.selection.stroke = Stroke::new(1.0, ON_ACCENT);
-
-    // Buttons paint `weak_bg_fill`, never `bg_fill` — setting only the latter (as this app did)
-    // leaves every button at egui's default grey. `bg_fill` still drives checkboxes and sliders.
-    for (state, weak, strong, stroke) in [
-        (0usize, GLASS, GLASS_RAISED, HAIRLINE),
-        (1, GLASS_RAISED, GLASS_RAISED, ACCENT),
-        (2, ACCENT_FILL, ACCENT_FILL, ACCENT),
-    ] {
-        let widget = match state {
-            0 => &mut visuals.widgets.inactive,
-            1 => &mut visuals.widgets.hovered,
-            _ => &mut visuals.widgets.active,
-        };
-        widget.weak_bg_fill = weak;
-        widget.bg_fill = strong;
-        widget.bg_stroke = Stroke::new(1.0, stroke);
-        widget.corner_radius = CornerRadius::same(10);
-        widget.fg_stroke = Stroke::new(1.0, if state == 2 { ON_ACCENT } else { TEXT });
-    }
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, HAIRLINE);
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT);
-    visuals.widgets.open.weak_bg_fill = GLASS_RAISED;
-    visuals.widgets.open.bg_stroke = Stroke::new(1.0, ACCENT);
-
-    ctx.set_visuals_of(egui::Theme::Dark, visuals.clone());
-    ctx.set_visuals_of(egui::Theme::Light, visuals);
-    ctx.set_theme(egui::ThemePreference::Dark);
-
-    ctx.all_styles_mut(|style| {
-        style.spacing.item_spacing = Vec2::new(8.0, 8.0);
-        style.spacing.button_padding = Vec2::new(12.0, 9.0);
-        style.spacing.interact_size.y = 30.0;
-        // The default floating bar is a 10pt invisible strip; a finger needs to see and hit it.
-        style.spacing.scroll.bar_width = 8.0;
-        style.spacing.scroll.floating = false;
-        // The handle takes `fg_stroke.color` while this is true — which is the near-white text
-        // colour, i.e. a glaring bar down the edge. False switches it to `bg_fill`, so it picks up
-        // the glass tint and only turns violet while it is being dragged.
-        style.spacing.scroll.foreground_color = false;
-        style.spacing.scroll.dormant_handle_opacity = 1.0;
-        style.spacing.scroll.active_handle_opacity = 1.0;
-        style.spacing.scroll.interact_handle_opacity = 1.0;
-        style.spacing.scroll.dormant_background_opacity = 0.0;
-        style.spacing.scroll.active_background_opacity = 0.4;
-        // Keep the handle off the pane's edge and the text off the handle — at the defaults the
-        // last characters of a line sit under the bar and read as clipped.
-        style.spacing.scroll.bar_inner_margin = 8.0;
-        style.spacing.scroll.bar_outer_margin = 3.0;
-    });
+    egui_mobile::theme::apply(ctx, egui_mobile::theme::Density::Touch);
 }
 
-/// The one gradient in the app, on the background layer under every panel.
-///
-/// This is what the translucent surfaces are translucent *against* — without it the glass has
-/// nothing to tint and the whole thing reads as flat grey.
+/// Paint the selected theme underneath translucent panels.
 pub fn paint_backdrop(ctx: &egui::Context) {
-    // The whole viewport, not `content_rect`: the status bar and the gesture strip sit outside the
-    // safe area, and stopping the gradient at the insets leaves black bands top and bottom.
     let rect = ctx.input(|input| input.viewport_rect());
-    let painter = ctx.layer_painter(egui::LayerId::background());
-    painter.add(egui::epaint::Shape::gradient_rect(
+    ctx.layer_painter(egui::LayerId::background()).rect_filled(
         rect,
-        egui::epaint::Direction::TopDown,
-        [BG_TOP, BG_BOTTOM],
-    ));
-    // Two nebula blooms rather than one: a magenta light source up top and a cooler aqua wash low
-    // down, so the field shifts hue as it falls instead of being a flat violet ramp.
-    for (centre, size, colour) in [
-        (
-            egui::pos2(rect.left() + rect.width() * 0.26, rect.top() + 40.0),
-            egui::vec2(rect.width() * 0.9, rect.width() * 0.5),
-            glass(255, 45, 170, 64),
-        ),
-        (
-            egui::pos2(rect.right() - rect.width() * 0.18, rect.top() + rect.height() * 0.34),
-            egui::vec2(rect.width() * 0.7, rect.width() * 0.5),
-            glass(150, 60, 255, 30),
-        ),
-    ] {
-        painter.add(
-            egui::epaint::RectShape::filled(
-                egui::Rect::from_center_size(centre, size),
-                CornerRadius::same(255),
-                colour,
-            )
-            .with_blur_width(rect.width() * 0.42),
-        );
-    }
+        0,
+        ctx.style_of(ctx.theme()).visuals.panel_fill,
+    );
 }
 
 /// A pane of glass — the app's one grouping primitive.
 pub fn card<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
-    glass_frame(GLASS)
+    Frame::group(ui.style())
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             let inner = add_contents(ui);
@@ -318,7 +223,7 @@ pub fn section_title(ui: &mut Ui, text: &str) {
     ui.label(
         RichText::new(text.to_uppercase())
             .size(11.0)
-            .color(MUTED)
+            .color(ui.visuals().weak_text_color())
             .strong(),
     );
 }
@@ -329,17 +234,17 @@ pub fn section_title(ui: &mut Ui, text: &str) {
 /// call after the fact would land on top of it. `Frame`'s own shadow is no use here: its margin
 /// maths excludes the shadow, so the halo would be clipped by the enclosing scroll area.
 pub fn big_button(ui: &mut Ui, text: &str, fill: Color32) -> Response {
+    let fill = if fill == ACCENT_FILL {
+        ui.visuals().selection.bg_fill
+    } else {
+        fill
+    };
     let slot = ui.painter().add(egui::Shape::Noop);
     let response = ui.add_sized(
-        [ui.available_width(), TOUCH_HEIGHT],
-        egui::Button::new(
-            RichText::new(text)
-                .size(16.0)
-                .strong()
-                .color(ON_ACCENT),
-        )
-        .fill(fill)
-        .corner_radius(CornerRadius::same(RADIUS)),
+        [ui.available_width(), ui.spacing().interact_size.y],
+        egui::Button::new(RichText::new(text).size(16.0).strong().color(ON_ACCENT))
+            .fill(fill)
+            .corner_radius(CornerRadius::same(RADIUS)),
     );
 
     let glow = if fill == ACCENT_FILL {
@@ -366,7 +271,9 @@ pub fn big_button(ui: &mut Ui, text: &str, fill: Color32) -> Response {
 /// widen the page past the screen and push everything to its right out of reach.
 pub fn detail_row(ui: &mut Ui, label: &str, value: RichText) {
     ui.horizontal(|ui| {
-        ui.add(egui::Label::new(RichText::new(label).color(MUTED)).truncate());
+        ui.add(
+            egui::Label::new(RichText::new(label).color(ui.visuals().weak_text_color())).truncate(),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add(egui::Label::new(value).truncate());
         });
@@ -375,8 +282,17 @@ pub fn detail_row(ui: &mut Ui, label: &str, value: RichText) {
 
 pub fn stat(ui: &mut Ui, label: &str, value: u64, color: Color32) {
     ui.vertical(|ui| {
-        ui.label(RichText::new(format_count(value)).size(22.0).color(color).strong());
-        ui.label(RichText::new(label).size(11.0).color(MUTED));
+        ui.label(
+            RichText::new(format_count(value))
+                .size(22.0)
+                .color(color)
+                .strong(),
+        );
+        ui.label(
+            RichText::new(label)
+                .size(11.0)
+                .color(ui.visuals().weak_text_color()),
+        );
     });
 }
 

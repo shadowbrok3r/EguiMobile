@@ -103,7 +103,8 @@ mod android {
         // brightness of the text on it, which both washes the blur out and drops the contrast of
         // the tab labels; a smoked film keeps the bars dark, leaves the light text readable, and
         // lets the blur read as movement behind glass.
-        let tint = Tint::from_srgb_unmultiplied([28, 10, 38, 148]);
+        let glass = egui_mobile::theme::glass(ui.ctx());
+        let tint = Tint::from_srgb_unmultiplied(glass.tint.to_srgba_unmultiplied());
 
         // `Live` drives a repaint every frame, which is only worth paying while the backdrop is
         // actually moving. Idle, this drops to the app's own 500ms poll cadence, so the blur costs
@@ -125,7 +126,7 @@ mod android {
                 ui,
                 Surface {
                     rect,
-                    blur_radius: BlurRadius::new(28.0),
+                    blur_radius: BlurRadius::new(glass.blur_radius),
                     tint,
                     corner_radius: CornerRadius::new(0.0),
                     presence: Presence::new(1.0),
