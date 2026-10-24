@@ -151,7 +151,7 @@ pub fn poll_consent() -> Option<bool> {
 /// Start capturing. Consent must already be granted — see [`request_consent`]. The tun descriptor
 /// arrives later as [`VpnEvent::Started`].
 pub fn start(config: &VpnConfig) -> bool {
-    register_natives();
+    if !register_natives() { return false; }
 
     let dns = config.dns.join(",");
     let address6 = config.address6.clone().unwrap_or_default();
@@ -175,7 +175,7 @@ pub fn start(config: &VpnConfig) -> bool {
 
 /// Run the foreground notification without a tun, so Android keeps the process alive.
 pub fn start_foreground(title: &str, text: &str) -> bool {
-    register_natives();
+    if !register_natives() { return false; }
 
     with_native_activity(|env, activity| {
         let intent = service_intent(env, activity, ACTION_FOREGROUND)?;
@@ -435,9 +435,9 @@ pub extern "system" fn Java_com_github_egui_1mobile_EguiVpnService_nativeVpnFail
 
 /// Bind the three service natives. `NativeActivity` dlopens the native library, so ART's own
 /// symbol lookup may never see them however they are exported.
-fn register_natives() {
+fn register_natives() -> bool {
     if REGISTERED.get().is_some() {
-        return;
+        return true;
     }
 
     let ok = with_native_activity(|env, activity| {
@@ -467,8 +467,11 @@ fn register_natives() {
     })
     .unwrap_or(false);
 
-    let _ = REGISTERED.set(ok);
+    // A transient Activity/ClassLoader failure must be retryable. Never start a
+    // service whose callbacks are unavailable: it would leave capture on Starting.
+    if ok { let _ = REGISTERED.set(true); }
     log::info!("egui-android vpn: register_natives ok={ok}");
+    ok
 }
 
 fn service_class<'l>(

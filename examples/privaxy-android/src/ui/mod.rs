@@ -17,10 +17,17 @@ pub enum Tab {
     Requests,
     Filters,
     Settings,
+    Pairing,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::Dashboard, Tab::Requests, Tab::Filters, Tab::Settings];
+    pub const ALL: [Tab; 5] = [
+        Tab::Dashboard,
+        Tab::Requests,
+        Tab::Filters,
+        Tab::Settings,
+        Tab::Pairing,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -28,6 +35,7 @@ impl Tab {
             Tab::Requests => "Requests",
             Tab::Filters => "Filters",
             Tab::Settings => "Settings",
+            Tab::Pairing => "Pairing",
         }
     }
 }

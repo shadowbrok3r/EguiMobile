@@ -16,7 +16,13 @@ impl DesktopPairing {
         use base64::Engine as _;
         let input = text.trim();
         let decoded;
-        let json = if let Some(encoded) = input.strip_prefix("privaxy-pair-v1:") {
+        if input.len() > 16384 {
+            return Err("Pairing code is too long".into());
+        }
+        let json = if let Some(encoded) = input
+            .strip_prefix("privaxy://pair?code=")
+            .or_else(|| input.strip_prefix("privaxy-pair-v1:"))
+        {
             decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .decode(encoded)
                 .map_err(|_| "Invalid pairing code")?;
@@ -29,10 +35,8 @@ impl DesktopPairing {
         Ok(pair)
     }
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_address()?;
         if self.version != 1
-            || self.port == 0
-            || self.host.is_empty()
-            || self.host.contains(['/', '\r', '\n', ' '])
             || self.token.len() != 64
             || !self.token.bytes().all(|b| b.is_ascii_hexdigit())
         {
@@ -40,6 +44,42 @@ impl DesktopPairing {
         }
         self.tls_config()?;
         Ok(())
+    }
+    fn validate_address(&self) -> Result<(), String> {
+        let host = self.host.as_str();
+        if self.port == 0
+            || host.is_empty()
+            || host.len() > 253
+            || host.chars().any(char::is_whitespace)
+            || host.contains(['/', '\\', '@', '?', '#', '[', ']'])
+            || (host.contains(':') && host.parse::<std::net::Ipv6Addr>().is_err())
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_unspecified() || ip.is_multicast())
+        {
+            return Err("Enter an IP address or hostname and a port from 1 to 65535. Use the desktop's address, not 0.0.0.0.".into());
+        }
+        Ok(())
+    }
+    pub fn with_address(&self, host: &str, port: &str) -> Result<Self, String> {
+        let mut pair = self.clone();
+        pair.host = host
+            .trim()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_owned();
+        pair.port = port
+            .trim()
+            .parse()
+            .map_err(|_| "Enter a port from 1 to 65535")?;
+        pair.validate()?;
+        Ok(pair)
+    }
+    pub fn is_tailscale(&self) -> bool {
+        self.host.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| {
+            let octets = ip.octets();
+            octets[0] == 100 && (64..=127).contains(&octets[1])
+        }) || self.host.ends_with(".ts.net")
     }
     fn tls_config(&self) -> Result<rustls::ClientConfig, String> {
         let der =
@@ -51,16 +91,33 @@ impl DesktopPairing {
             .with_no_client_auth())
     }
     pub async fn relay(&self, mut local: tokio::net::TcpStream) -> Result<(), String> {
+        let mut remote = self.connect(false).await?;
+        tokio::io::copy_bidirectional(&mut local, &mut remote)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    async fn connect(
+        &self,
+        status: bool,
+    ) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>, String> {
         self.validate()?;
         let connect = async {
             let tcp = tokio::net::TcpStream::connect((self.host.as_str(), self.port))
                 .await
                 .map_err(|e| e.to_string())?;
             let name = rustls_pki_types::ServerName::try_from("privaxy-desktop").unwrap();
-            let mut remote = tokio_rustls::TlsConnector::from(Arc::new(self.tls_config()?))
+            let mut config = self.tls_config()?;
+            if status {
+                config.alpn_protocols = vec![b"privaxy-status-v1".to_vec()];
+            }
+            let mut remote = tokio_rustls::TlsConnector::from(Arc::new(config))
                 .connect(name, tcp)
                 .await
                 .map_err(|e| e.to_string())?;
+            if status && remote.get_ref().1.alpn_protocol() != Some(b"privaxy-status-v1") {
+                return Err("Update Privaxy desktop to enable connection status".into());
+            }
             remote
                 .write_all(self.token.as_bytes())
                 .await
@@ -75,13 +132,107 @@ impl DesktopPairing {
             }
             Ok::<_, String>(remote)
         };
-        let mut remote = tokio::time::timeout(std::time::Duration::from_secs(15), connect)
-            .await
-            .map_err(|_| "Desktop connection timed out")??;
-        tokio::io::copy_bidirectional(&mut local, &mut remote)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(())
+        tokio::time::timeout(
+            std::time::Duration::from_secs(if status { 5 } else { 15 }),
+            connect,
+        )
+        .await
+        .map_err(|_| "Desktop connection timed out")?
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ConnectionStatus {
+    #[default]
+    Unpaired,
+    Checking,
+    Connected,
+    Offline(String),
+}
+impl ConnectionStatus {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Unpaired => "Desktop: not paired",
+            Self::Checking => "Desktop: checking",
+            Self::Connected => "Desktop: connected · paired",
+            Self::Offline(_) => "Desktop: offline · pairing saved",
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct ConnectionMonitor {
+    pair: Option<DesktopPairing>,
+    runtime: Option<tokio::runtime::Runtime>,
+    status: Arc<std::sync::Mutex<ConnectionStatus>>,
+}
+impl ConnectionMonitor {
+    pub fn status(&self) -> ConnectionStatus {
+        self.status.lock().unwrap().clone()
+    }
+    pub fn sync(&mut self, pair: Option<&DesktopPairing>) {
+        if self.pair.as_ref() == pair {
+            return;
+        }
+        if let Some(rt) = self.runtime.take() {
+            rt.shutdown_background();
+        }
+        self.pair = pair.cloned();
+        // Use a fresh status cell so a cancelled old connection cannot overwrite the new one.
+        self.status = Arc::default();
+        let Some(pair) = self.pair.clone() else {
+            return;
+        };
+        *self.status.lock().unwrap() = ConnectionStatus::Checking;
+        let runtime = match tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .thread_name("privaxy-pairing")
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                *self.status.lock().unwrap() = ConnectionStatus::Offline(e.to_string());
+                return;
+            }
+        };
+        let status = self.status.clone();
+        runtime.spawn(async move {
+            loop {
+                let result = async {
+                    let mut stream = pair.connect(true).await?;
+                    loop {
+                        let ping = async {
+                            stream.write_all(b"P").await?;
+                            stream.flush().await?;
+                            if stream.read_u8().await? != b'P' {
+                                return Err(std::io::Error::other("Invalid desktop heartbeat"));
+                            }
+                            Ok::<_, std::io::Error>(())
+                        };
+                        tokio::time::timeout(std::time::Duration::from_secs(5), ping)
+                            .await
+                            .map_err(|_| "Desktop stopped responding".to_owned())?
+                            .map_err(|e| e.to_string())?;
+                        *status.lock().unwrap() = ConnectionStatus::Connected;
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    }
+                    #[allow(unreachable_code)]
+                    Ok::<(), String>(())
+                }
+                .await;
+                *status.lock().unwrap() = ConnectionStatus::Offline(result.unwrap_err());
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+        });
+        self.runtime = Some(runtime);
+    }
+}
+impl Drop for ConnectionMonitor {
+    fn drop(&mut self) {
+        if let Some(rt) = self.runtime.take() {
+            rt.shutdown_background();
+        }
     }
 }
 
@@ -117,6 +268,25 @@ mod tests {
                 .encode(serde_json::to_vec(&pair).unwrap())
         );
         assert_eq!(DesktopPairing::parse(&code).unwrap(), pair);
+        let uri = code.replace("privaxy-pair-v1:", "privaxy://pair?code=");
+        assert_eq!(DesktopPairing::parse(&uri).unwrap(), pair);
+        let moved = pair.with_address(" 100.64.0.2 ", "8101").unwrap();
+        assert!(moved.is_tailscale());
+        assert_eq!(moved.token, pair.token);
+        assert_eq!(moved.certificate_pem, pair.certificate_pem);
+        for host in [
+            "",
+            "0.0.0.0",
+            "::",
+            "http://desktop",
+            "192.168.1.2:8101",
+            "bad\thost",
+        ] {
+            assert!(pair.with_address(host, "8101").is_err());
+        }
+        assert!(pair.with_address("192.168.1.2", "0").is_err());
+        assert!(pair.with_address("192.168.1.2", "65536").is_err());
+        assert!(DesktopPairing::parse(&(uri + "&unexpected=1")).is_err());
         assert!(!format!("{pair:?}").contains(&pair.token));
         let server = rustls::ServerConfig::builder()
             .with_no_client_auth()

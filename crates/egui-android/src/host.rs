@@ -2213,6 +2213,8 @@ pub trait HostExt {
     fn open_app_store(&self);
     /// App Store only: consume a join link or a requested package detail page as JSON.
     fn take_store_request(&self) -> Option<String>;
+    /// Consume the next ACTION_VIEW URL, from a cold launch or onNewIntent.
+    fn take_view_intent(&self) -> Option<String>;
     /// App Store only: apply its saved background update preference.
     fn configure_store_updates(&self);
     /// Lock or release the screen orientation. See [`ScreenOrientation`].
@@ -2374,6 +2376,15 @@ impl HostExt for Host {
             Ok(result)
         });
         value.filter(|s:&String|!s.is_empty())
+    }
+    fn take_view_intent(&self) -> Option<String> {
+        let value = with_activity(|env, activity| {
+            let obj = env.call_method(activity, "takeViewIntent", "()Ljava/lang/String;", &[])?.l()?;
+            if obj.is_null() { return Ok(String::new()); }
+            let value = env.get_string(&jni::objects::JString::from(obj))?.into();
+            Ok(value)
+        })?;
+        (!value.is_empty()).then_some(value)
     }
     fn set_screen_orientation(&self, o: ScreenOrientation) {
         let v = match o {

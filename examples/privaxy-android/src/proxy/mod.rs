@@ -35,6 +35,7 @@ const FILTER_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60 * 12);
 type Subscriptions = Arc<std::sync::Mutex<(Vec<Filter>, Vec<String>)>>;
 
 pub struct ProxyHandle {
+    starting_at: std::time::Instant,
     runtime: Option<tokio::runtime::Runtime>,
     shutdown: Option<oneshot::Sender<()>>,
     pub state: Arc<ProxyState>,
@@ -116,14 +117,27 @@ impl ProxyHandle {
             .desktop_enabled
             .then(|| config.desktop_pairing.clone())
             .flatten();
-        runtime.spawn(serve(
+        let serving = serve(
             desktop,
             session,
             bind_address,
             share_on_network,
             shutdown_rx,
             state.clone(),
-        ));
+        );
+        let failure_state = state.clone();
+        runtime.spawn(async move {
+            use futures::FutureExt;
+            if std::panic::AssertUnwindSafe(serving)
+                .catch_unwind()
+                .await
+                .is_err()
+            {
+                failure_state.set_status(Status::Failed(
+                    "Proxy task stopped unexpectedly. Tap Start to retry.".into(),
+                ));
+            }
+        });
 
         let subscriptions: Subscriptions = Arc::new(std::sync::Mutex::new((
             config.filters.clone(),
@@ -139,6 +153,7 @@ impl ProxyHandle {
         ));
 
         Self {
+            starting_at: std::time::Instant::now(),
             runtime: Some(runtime),
             shutdown: Some(shutdown_tx),
             state,
@@ -153,6 +168,7 @@ impl ProxyHandle {
 
     fn stopped(state: Arc<ProxyState>, paths: Paths) -> Self {
         Self {
+            starting_at: std::time::Instant::now(),
             runtime: None,
             shutdown: None,
             state,
@@ -162,6 +178,17 @@ impl ProxyHandle {
             client: build_client(),
             paths,
             subscriptions: Arc::new(std::sync::Mutex::new((Vec::new(), Vec::new()))),
+        }
+    }
+
+    pub fn poll_startup(&mut self) {
+        if matches!(self.state.status(), Status::Starting)
+            && self.starting_at.elapsed() >= Duration::from_secs(10)
+        {
+            self.stop();
+            self.state.set_status(Status::Failed(
+                "Proxy did not start within 10 seconds. Tap Start to retry.".into(),
+            ));
         }
     }
 
@@ -411,7 +438,8 @@ async fn serve(
         });
     }
 
-    state.set_status(Status::Stopped);
+    // The owner sets Stopped. An old listener finishing after a restart must not
+    // overwrite the replacement listener's Starting/Running state.
 }
 
 /// Restarting drops the old runtime in the background, so the previous listener can still hold the

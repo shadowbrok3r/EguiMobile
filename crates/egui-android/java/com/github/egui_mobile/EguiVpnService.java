@@ -109,11 +109,15 @@ public class EguiVpnService extends VpnService {
         }
 
         tunOpen = true;
+        int fd = pfd.detachFd();
         try {
-            nativeVpnStarted(pfd.detachFd(), mtu);
+            nativeVpnStarted(fd, mtu);
         } catch (Throwable t) {
             // The native library is only loaded once the activity has run.
             Log.e(TAG, "nativeVpnStarted unavailable: " + t);
+            try { ParcelFileDescriptor.adoptFd(fd).close(); } catch (Exception ignored) {}
+            try { nativeVpnFailed("VPN callback unavailable; reopen Privaxy and retry capture"); }
+            catch (Throwable ignored) {}
             tunOpen = false;
             stopSelf();
         }

@@ -68,6 +68,7 @@ public class EguiNativeActivity extends NativeActivity {
     /** The hidden EditText's text after its last change, readable from the render thread. */
     private volatile String imeTextSnapshot = "";
     private final ConcurrentLinkedQueue<String> storeRequests = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<String> viewIntents = new ConcurrentLinkedQueue<>();
     private EguiStoreBridge storeBridge;
 
     @Override
@@ -89,6 +90,7 @@ public class EguiNativeActivity extends NativeActivity {
         registerInstallReceiver();
         storeBridge = new EguiStoreBridge(this);
         receiveStoreIntent(getIntent());
+        if (savedInstanceState == null) receiveViewIntent(getIntent());
     }
 
     /** Dark DeviceDefault theme for an activity whose manifest names no theme. */
@@ -119,7 +121,19 @@ public class EguiNativeActivity extends NativeActivity {
     }
 
     @Override protected void onNewIntent(Intent intent) {
-        super.onNewIntent(intent);setIntent(intent);receiveStoreIntent(intent);
+        super.onNewIntent(intent);setIntent(intent);receiveStoreIntent(intent);receiveViewIntent(intent);
+    }
+    private void receiveViewIntent(Intent intent) {
+        if (intent == null || !Intent.ACTION_VIEW.equals(intent.getAction())) return;
+        String uri = intent.getDataString();
+        if (uri == null || uri.length() > 16384 || viewIntents.size() >= 4) return;
+        viewIntents.add(uri);
+        try { nativeImeWake(); } catch (Throwable ignored) {}
+    }
+    /** Consumed once by the native app; never log URLs, which can contain pairing credentials. */
+    public String takeViewIntent() {
+        String uri = viewIntents.poll();
+        return uri == null ? "" : uri;
     }
     private void receiveStoreIntent(Intent intent) {
         if(!EguiStoreBridge.STORE.equals(getPackageName()) || intent==null)return;

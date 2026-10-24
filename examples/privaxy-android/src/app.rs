@@ -25,13 +25,22 @@ pub struct Loaded {
     pub state: Arc<ProxyState>,
     pub proxy: Option<ProxyHandle>,
     pub vpn: VpnController,
+    pub desktop: crate::proxy::pairing::ConnectionMonitor,
     pub certificate_check: crate::certificate::CertificateCheck,
 }
 
 impl Loaded {
     pub fn start_proxy(&mut self) {
-        if self.proxy.is_some() {
+        if self.proxy.is_some()
+            && matches!(
+                self.state.status(),
+                Status::Starting | Status::Running { .. }
+            )
+        {
             return;
+        }
+        if let Some(mut previous) = self.proxy.take() {
+            previous.stop();
         }
         self.proxy = Some(ProxyHandle::start(
             &self.config,
@@ -236,6 +245,8 @@ pub struct PrivaxyApp {
 
     // Text buffers the settings and filter screens edit, flushed into the config on save.
     pub pairing_draft: String,
+    pub desktop_host: String,
+    pub desktop_port: String,
     pub port_text: String,
     pub vpn_dns_text: String,
     pub exclusions_draft: String,
@@ -321,6 +332,8 @@ impl PrivaxyApp {
             init_error: None,
             tab: Tab::Dashboard,
             pairing_draft: String::new(),
+            desktop_host: String::new(),
+            desktop_port: "8101".into(),
             port_text: String::new(),
             vpn_dns_text: String::new(),
             exclusions_draft: String::new(),
@@ -356,6 +369,10 @@ impl PrivaxyApp {
         match paths.load_or_create() {
             Ok(config) => {
                 self.port_text = config.listen_port.to_string();
+                if let Some(pair) = &config.desktop_pairing {
+                    self.desktop_host = pair.host.clone();
+                    self.desktop_port = pair.port.to_string();
+                }
                 self.vpn_dns_text = config.vpn_dns.clone();
                 self.request_filters = config.request_filters.clone();
                 self.inspect_wrap = config.inspect_wrap;
@@ -373,6 +390,7 @@ impl PrivaxyApp {
                 let start_now = config.start_on_launch;
                 let capture_now = config.capture_all;
                 let mut loaded = Loaded {
+                    desktop: Default::default(),
                     paths,
                     config,
                     state,
@@ -448,35 +466,54 @@ impl PrivaxyApp {
     }
 
     fn tab_bar(&mut self, ui: &mut egui::Ui, host: &Host) {
-        ui.horizontal(|ui| {
-            let gaps = ui.spacing().item_spacing.x * (Tab::ALL.len() - 1) as f32;
-            let width = (ui.available_width() - gaps) / Tab::ALL.len() as f32;
-            for tab in Tab::ALL {
-                let selected = self.tab == tab;
-                // White on the violet chip, not violet on violet — the latter was 2:1.
-                let text =
-                    egui::RichText::new(tab.label())
-                        .size(13.0)
-                        .strong()
-                        .color(if selected {
-                            ui::ON_ACCENT
-                        } else {
-                            ui.visuals().weak_text_color()
-                        });
-
-                if ui
-                    .add_sized(
-                        [width, ui::TOUCH_HEIGHT],
-                        egui::Button::selectable(selected, text),
-                    )
-                    .clicked()
-                    && !selected
-                {
-                    self.tab = tab;
-                    host.haptic(Haptic::Selection);
-                }
+        if let Some(loaded) = &self.loaded {
+            let status = loaded.desktop.status();
+            let color = match status {
+                crate::proxy::pairing::ConnectionStatus::Connected => ui::GOOD,
+                crate::proxy::pairing::ConnectionStatus::Offline(_) => ui::WARN,
+                _ => ui.visuals().weak_text_color(),
+            };
+            if ui
+                .selectable_label(
+                    self.tab == Tab::Pairing,
+                    egui::RichText::new(format!("● {}", status.label()))
+                        .size(12.0)
+                        .color(color),
+                )
+                .clicked()
+            {
+                self.tab = Tab::Pairing;
             }
-        });
+        }
+        egui::ScrollArea::horizontal()
+            .id_salt("title-tabs")
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for tab in Tab::ALL {
+                        let selected = self.tab == tab;
+                        // White on the violet chip, not violet on violet — the latter was 2:1.
+                        let text = egui::RichText::new(tab.label()).size(13.0).strong().color(
+                            if selected {
+                                ui::ON_ACCENT
+                            } else {
+                                ui.visuals().weak_text_color()
+                            },
+                        );
+
+                        if ui
+                            .add_sized(
+                                [0.0, ui::TOUCH_HEIGHT],
+                                egui::Button::selectable(selected, text),
+                            )
+                            .clicked()
+                            && !selected
+                        {
+                            self.tab = tab;
+                            host.haptic(Haptic::Selection);
+                        }
+                    }
+                });
+            });
     }
 }
 
@@ -491,6 +528,10 @@ impl EguiApp for PrivaxyApp {
             app.ensure_loaded(host);
             if let Some(loaded) = app.loaded.as_mut() {
                 app.port_text = loaded.config.listen_port.to_string();
+                if let Some(pair) = &loaded.config.desktop_pairing {
+                    app.desktop_host = pair.host.clone();
+                    app.desktop_port = pair.port.to_string();
+                }
                 app.vpn_dns_text = loaded.config.vpn_dns.clone();
                 app.request_filters = loaded.config.request_filters.clone();
                 app.inspect_wrap = loaded.config.inspect_wrap;
@@ -542,8 +583,34 @@ impl PrivaxyApp {
 
         self.ensure_loaded(host);
 
+        #[cfg(target_os = "android")]
+        {
+            use egui_mobile::HostExt;
+            if let Some(uri) = host.take_view_intent() {
+                match crate::proxy::pairing::DesktopPairing::parse(&uri) {
+                    Ok(pair) => {
+                        self.desktop_host = pair.host;
+                        self.desktop_port = pair.port.to_string();
+                        self.pairing_draft = uri;
+                        self.tab = Tab::Pairing;
+                        self.notice = Some("Review this desktop, then tap Pair desktop.".into());
+                        egui_mobile::note_ime_out_of_band_edit();
+                    }
+                    Err(reason) => self.notice = Some(reason),
+                }
+            }
+        }
         // The consent dialog's answer and the VPN service's callbacks both arrive on Java threads.
         if let Some(loaded) = self.loaded.as_mut() {
+            loaded.desktop.sync(loaded.config.desktop_pairing.as_ref());
+            if let Some(proxy) = loaded.proxy.as_mut() {
+                proxy.poll_startup();
+            }
+            if let Status::Failed(reason) = loaded.state.status() {
+                if loaded.vpn.status().is_on() {
+                    loaded.vpn.fail(format!("The local proxy failed: {reason}"));
+                }
+            }
             loaded.certificate_check.update(&loaded.config.ca);
             if loaded.vpn.poll() {
                 // Revoking the VPN in Settings stops the service outright, notification included,
@@ -567,15 +634,14 @@ impl PrivaxyApp {
         // to the list underneath it.
         let top = egui::Panel::top("header")
             .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 3)))
-            .show(ui, |ui| self.header(ui, host))
+            .show(ui, |ui| {
+                self.header(ui, host);
+                self.tab_bar(ui, host);
+            })
             .response
             .rect;
 
-        let bottom = egui::Panel::bottom("tabs")
-            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 6)))
-            .show(ui, |ui| self.tab_bar(ui, host))
-            .response
-            .rect;
+        let bottom = egui::Rect::NOTHING;
 
         // Stashed for the next frame to frost: the rect is only known now, and the blur has to be
         // enqueued before the content paints.
@@ -652,6 +718,7 @@ impl PrivaxyApp {
                         Tab::Requests => unreachable!(),
                         Tab::Filters => ui::filters::show(self, ui, host),
                         Tab::Settings => ui::settings::show(self, ui, host),
+                        Tab::Pairing => ui::settings::pairing(self, ui, host),
                     });
             });
 
@@ -686,5 +753,54 @@ impl PrivaxyApp {
         // loop, so the UI polls instead of idling.
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(500));
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn failed_listener_can_retry_without_relaunching_app() {
+        let directory = std::env::temp_dir().join(format!("privaxy-retry-{}", std::process::id()));
+        let paths = Paths::new(&directory);
+        let mut config = paths.load_or_create().unwrap();
+        config.filters.clear();
+        config.foreground_service = false;
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        config.listen_port = occupied.local_addr().unwrap().port();
+        let state = Arc::new(ProxyState::new(config.mode));
+        let mut loaded = Loaded {
+            paths,
+            config,
+            state,
+            proxy: None,
+            vpn: VpnController::new(),
+            desktop: Default::default(),
+            certificate_check: Default::default(),
+        };
+        loaded.start_proxy();
+        let wait = |loaded: &Loaded, predicate: fn(Status) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !predicate(loaded.state.status()) {
+                assert!(
+                    Instant::now() < deadline,
+                    "status: {:?}",
+                    loaded.state.status()
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        wait(&loaded, |s| matches!(s, Status::Failed(_)));
+        drop(occupied);
+        loaded.start_proxy();
+        wait(&loaded, |s| s.is_running());
+        loaded.restart_proxy();
+        wait(&loaded, |s| s.is_running());
+        loaded.stop_proxy();
+        assert!(matches!(loaded.state.status(), Status::Stopped));
+        drop(loaded);
+        let _ = std::fs::remove_dir_all(directory);
     }
 }

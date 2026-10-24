@@ -2,7 +2,7 @@
 name = "privaxy_android"
 # Android versionCode is derived from this: (1<<24)|(major<<16)|(minor<<8)|patch.
 # Bump before every release build — the phone only offers an update whose code is strictly greater.
-version = "0.5.6"
+version = "0.5.7"
 edition = "2024"
 publish = false
 
@@ -119,12 +119,19 @@ uses_cleartext_traffic = true
 name = "com.github.egui_mobile.EguiNativeActivity"
 config_changes = "orientation|keyboardHidden|screenSize|screenLayout|density"
 window_soft_input_mode = "adjustResize"
+launch_mode = "singleTask"
 [[package.metadata.android.application.activity.meta_data]]
 name = "android.app.lib_name"
 value = "privaxy_android"
 [[package.metadata.android.application.activity.intent_filter]]
 actions = ["android.intent.action.MAIN"]
 categories = ["android.intent.category.LAUNCHER"]
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.VIEW"]
+categories = ["android.intent.category.DEFAULT", "android.intent.category.BROWSABLE"]
+[[package.metadata.android.application.activity.intent_filter.data]]
+scheme = "privaxy"
+host = "pair"
 
 # Transparent capture, and the foreground notification that keeps the proxy's process alive.
 # BIND_VPN_SERVICE is held by the system, not requested: it is what stops other apps binding this.

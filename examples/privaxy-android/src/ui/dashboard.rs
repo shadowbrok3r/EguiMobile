@@ -250,7 +250,11 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
         ui.add_space(6.0);
         match loaded.state.filters_status() {
             FiltersStatus::Idle => {
-                ui.label(egui::RichText::new("Not loaded").color(ui::MUTED).size(13.0));
+                ui.label(
+                    egui::RichText::new("Not loaded")
+                        .color(ui::MUTED)
+                        .size(13.0),
+                );
             }
             FiltersStatus::Updating { completed, total } => {
                 ui.horizontal(|ui| {
@@ -340,6 +344,16 @@ fn capture_card(loaded: &mut crate::app::Loaded, ui: &mut egui::Ui, host: &Host)
             VpnStatus::Failed(_) => ("• Capture failed", ui::BAD),
         };
         ui.label(egui::RichText::new(label).size(15.0).strong().color(color));
+
+        if loaded.config.desktop_enabled
+            && loaded
+                .config
+                .desktop_pairing
+                .as_ref()
+                .is_some_and(|pair| pair.is_tailscale())
+        {
+            ui.label(egui::RichText::new("Tailscale needs Android's VPN slot too. Keep capture off for proxy-only routing through Tailscale, or select the desktop LAN address for full capture.").color(ui::WARN));
+        }
 
         if let VpnStatus::Failed(error) = &status {
             ui.add_space(2.0);

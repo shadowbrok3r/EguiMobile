@@ -9,6 +9,33 @@ the device's default route and feeds every app's traffic into it, so it covers m
 cargo egui-mobile run -a --release      # from this directory
 ```
 
+## Desktop pairing and connection status
+
+Scan the desktop QR with the phone camera to open **Pairing**, review its address,
+and tap **Pair desktop**. Pasting a new link or an older pairing code also works.
+A new desktop needs its pairing code once; an IP alone cannot establish its identity.
+Edit **Desktop IP or hostname** and **Relay port**, then **Save address** to change
+the address of an already paired desktop while keeping its certificate and token.
+
+The top bar contains navigation and a live connection indicator. **Connected · paired**
+means pinned TLS authentication and a heartbeat succeeded. **Offline · pairing saved**
+means the credentials are remembered but the desktop is not responding; the reason
+appears on Pairing and retries are automatic. Idle phones remain visible on desktop.
+The status connection is separate from HTTP traffic and does not enable routing by itself.
+
+Enable desktop routing and, on LAN, **Capture all traffic** for device-wide capture.
+Android only permits one VPN per profile: Tailscale and Privaxy capture cannot share
+that slot, even with app split tunneling. With Tailscale, leave capture off, keep
+Privaxy included in Tailscale routing, and point proxy-aware apps at `127.0.0.1:8100`.
+Use a LAN desktop address or a network gateway routing to the tailnet for full capture.
+DNS and other UDP remain direct. Desktop HTTPS inspection uses the desktop's CA.
+
+Proxy startup times out after 10 seconds and the Android VPN callback after 15 seconds.
+A failure stops capture and provides a retryable error instead of an indefinite
+Starting state. Waiting for the system permission dialog does not time out.
+Capture shutdown drains TCP tasks before stopping their executor; otherwise ipstack
+can deadlock while dropping streams and leave the VPN interface open.
+
 ## What changed from the desktop server
 
 | Desktop privaxy | Here | Why |

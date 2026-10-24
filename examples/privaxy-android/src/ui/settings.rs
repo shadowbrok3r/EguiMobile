@@ -5,7 +5,7 @@ use crate::proxy::ca::CertAuthority;
 use crate::ui;
 use egui_mobile::{Haptic, Host, egui};
 
-pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
+pub fn pairing(app: &mut PrivaxyApp, ui: &mut egui::Ui, _host: &Host) {
     let Some(loaded) = app.loaded.as_mut() else {
         return;
     };
@@ -13,7 +13,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
     ui::card(ui, |ui| {
         ui::section_title(ui, "Desktop pairing");
         ui.label(
-            "Paste the pairing code from Privaxy desktop. Pairing is remembered on this device.",
+            "Scan the desktop QR with your camera to open Privaxy, or paste its pairing code. Pair once to save the desktop certificate and credentials.",
         );
         ui.add(
             egui::TextEdit::singleline(&mut app.pairing_draft)
@@ -23,7 +23,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
         #[cfg(target_os = "android")]
         if ui.button("Paste pairing code").clicked() {
             use egui_mobile::HostExt;
-            match host.clipboard_text() {
+            match _host.clipboard_text() {
                 Some(text) => {
                     app.pairing_draft = text;
                     egui_mobile::note_ime_out_of_band_edit();
@@ -31,9 +31,14 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                 None => app.notice = Some("Copy a pairing code from desktop first.".into()),
             }
         }
+        if let Ok(pair) = crate::proxy::pairing::DesktopPairing::parse(&app.pairing_draft) {
+            ui.label(format!("Pair with {}:{}", pair.host, pair.port));
+        }
         if ui.button("Pair desktop").clicked() {
             match crate::proxy::pairing::DesktopPairing::parse(&app.pairing_draft) {
                 Ok(pair) => {
+                    app.desktop_host = pair.host.clone();
+                    app.desktop_port = pair.port.to_string();
                     loaded.config.desktop_pairing = Some(pair);
                     if loaded.config.desktop_enabled {
                         loaded.restart_proxy();
@@ -41,7 +46,8 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                     match loaded.save() {
                         Ok(()) => {
                             app.pairing_draft.clear();
-                            app.notice = Some("Desktop paired. Enable routing when ready.".into());
+                            app.notice =
+                                Some("Pairing saved. Checking the desktop connection…".into());
                         }
                         Err(e) => app.notice = Some(e),
                     }
@@ -49,8 +55,50 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                 Err(e) => app.notice = Some(e),
             }
         }
+        let status = loaded.desktop.status();
+        ui.label(status.label());
+        if let crate::proxy::pairing::ConnectionStatus::Offline(reason) = &status {
+            ui.label(reason);
+        }
+        ui.label("Desktop IP or hostname");
+        ui.add(
+            egui::TextEdit::singleline(&mut app.desktop_host)
+                .hint_text("192.168.1.10 or 100.x.x.x"),
+        );
+        ui.label("Relay port");
+        ui.add(
+            egui::TextEdit::singleline(&mut app.desktop_port)
+                .char_limit(5)
+                .desired_width(100.0),
+        );
+        if ui
+            .add_enabled(
+                loaded.config.desktop_pairing.is_some(),
+                egui::Button::new("Save address"),
+            )
+            .clicked()
+        {
+            let pair = loaded.config.desktop_pairing.as_ref().unwrap();
+            match pair.with_address(&app.desktop_host, &app.desktop_port) {
+                Ok(pair) => {
+                    loaded.config.desktop_pairing = Some(pair);
+                    if let Err(e) = loaded.save() {
+                        app.notice = Some(e);
+                    } else {
+                        app.notice = Some("Address saved. Checking the desktop connection…".into());
+                    }
+                    if loaded.config.desktop_enabled {
+                        loaded.restart_proxy();
+                    }
+                }
+                Err(e) => app.notice = Some(e),
+            }
+        }
         if let Some(pair) = &loaded.config.desktop_pairing {
-            ui.label(format!("Paired: {}:{}", pair.host, pair.port));
+            ui.label(format!("Saved desktop: {}:{}", pair.host, pair.port));
+            if pair.is_tailscale() {
+                ui.label(egui::RichText::new("Tailscale address: keep Capture all traffic OFF while Tailscale is your Android VPN. Splitting apps does not allow two VPNs. For full capture, use the LAN address or a network gateway that routes to Tailscale.").color(ui::WARN));
+            }
             let mut enabled = loaded.config.desktop_enabled;
             if ui
                 .checkbox(&mut enabled, "Route captured TCP traffic through desktop")
@@ -62,7 +110,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                 }
                 loaded.restart_proxy();
             }
-            ui.label("Enable Capture all apps on Dashboard. Requests and inspection appear on desktop. Install the desktop CA for HTTPS inspection; DNS and other UDP remain direct. If desktop is unavailable, TCP fails rather than bypassing it.");
+            ui.label("On LAN, enable Capture all traffic on Dashboard. With Tailscale, use proxy-only mode and configure supported apps to use 127.0.0.1:8100; keep Privaxy included in Tailscale routing. Desktop performs inspection using its CA. DNS and UDP remain direct. TCP fails if the desktop is unavailable.");
             if ui.button("Forget desktop").clicked() {
                 loaded.config.desktop_enabled = false;
                 loaded.config.desktop_pairing = None;
@@ -74,7 +122,12 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
         }
     });
     ui.add_space(10.0);
+}
 
+pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
+    let Some(loaded) = app.loaded.as_mut() else {
+        return;
+    };
     ui::card(ui, |ui| {
         if egui_mobile::theme::editor(
             ui,

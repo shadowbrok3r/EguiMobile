@@ -71,16 +71,18 @@ pub async fn run(
 
     let tcp_flows = Arc::new(AtomicUsize::new(0));
     let udp_flows = Arc::new(AtomicUsize::new(0));
+    let mut flows = tokio::task::JoinSet::new();
     log::info!("Privaxy VPN relaying to {}", config.proxy);
 
-    loop {
+    let result = loop {
+        while flows.try_join_next().is_some() {}
         let stream = tokio::select! {
-            _ = &mut shutdown => return None,
+            _ = &mut shutdown => break None,
             accepted = stack.accept() => match accepted {
                 Ok(stream) => stream,
                 Err(error) => {
                     log::warn!("VPN stack stopped: {error}");
-                    return Some(format!("The VPN interface closed: {error}"));
+                    break Some(format!("The VPN interface closed: {error}"));
                 }
             },
         };
@@ -98,7 +100,7 @@ pub async fn run(
                 let stats = stats.clone();
                 let dns = dns.clone();
                 let counter = tcp_flows.clone();
-                tokio::spawn(async move {
+                flows.spawn(async move {
                     if let Err(error) = tcp_flow(tcp, config, stats, dns).await {
                         log::debug!("VPN tcp flow ended: {error}");
                     }
@@ -116,7 +118,7 @@ pub async fn run(
                 let stats = stats.clone();
                 let dns = dns.clone();
                 let counter = udp_flows.clone();
-                tokio::spawn(async move {
+                flows.spawn(async move {
                     if let Err(error) = udp_flow(udp, config, stats, dns).await {
                         log::debug!("VPN udp flow ended: {error}");
                     }
@@ -127,7 +129,14 @@ pub async fn run(
             // would only make the phone look like a router it is not.
             IpStackStream::UnknownTransport(_) | IpStackStream::UnknownNetwork(_) => {}
         }
-    }
+    };
+    // IpStackTcpStream::drop waits for its own task. Keep the executor running
+    // until every stream has finished dropping, including queued accepts.
+    // Shutting the runtime down first deadlocks that wait and leaks the tun.
+    drop(stack);
+    flows.abort_all();
+    while flows.join_next().await.is_some() {}
+    result
 }
 
 async fn tcp_flow(
@@ -146,25 +155,21 @@ async fn tcp_flow(
         Vec::new()
     };
 
-    let mut upstream = match tokio::time::timeout(
-        PROXY_CONNECT_TIMEOUT,
-        TcpStream::connect(config.proxy),
-    )
-    .await
-    {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(error)) => {
-            stats.refused.fetch_add(1, Ordering::Relaxed);
-            return Err(error);
-        }
-        Err(_) => {
-            stats.refused.fetch_add(1, Ordering::Relaxed);
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "the proxy did not accept the connection",
-            ));
-        }
-    };
+    let mut upstream =
+        match tokio::time::timeout(PROXY_CONNECT_TIMEOUT, TcpStream::connect(config.proxy)).await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                stats.refused.fetch_add(1, Ordering::Relaxed);
+                return Err(error);
+            }
+            Err(_) => {
+                stats.refused.fetch_add(1, Ordering::Relaxed);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "the proxy did not accept the connection",
+                ));
+            }
+        };
     let _ = upstream.set_nodelay(true);
 
     if destination.port() == 80 {
@@ -245,7 +250,9 @@ async fn connect_through_proxy(
             break at;
         }
         if reply.len() >= MAX_PROXY_REPLY {
-            return Err(std::io::Error::other("the proxy's reply had no end of headers"));
+            return Err(std::io::Error::other(
+                "the proxy's reply had no end of headers",
+            ));
         }
         match tokio::time::timeout(PROXY_REPLY_TIMEOUT, upstream.read(&mut chunk)).await {
             Ok(Ok(0)) => return Err(std::io::Error::other("the proxy closed the connection")),
@@ -258,7 +265,9 @@ async fn connect_through_proxy(
     let status = status_code(&reply)
         .ok_or_else(|| std::io::Error::other("the proxy's reply was not HTTP"))?;
     if !(200..300).contains(&status) {
-        return Err(std::io::Error::other(format!("the proxy answered {status}")));
+        return Err(std::io::Error::other(format!(
+            "the proxy answered {status}"
+        )));
     }
 
     Ok(reply.split_off(header_end))

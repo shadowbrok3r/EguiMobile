@@ -25,7 +25,7 @@ mod tun;
 use dns::DnsMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How long an address keeps the name it was resolved for. Long enough to outlive a page's worth
 /// of connections, short enough that a recycled CDN address is not mislabelled for the rest of
@@ -45,7 +45,10 @@ pub enum VpnStatus {
 
 impl VpnStatus {
     pub fn is_on(&self) -> bool {
-        matches!(self, VpnStatus::Requesting | VpnStatus::Starting | VpnStatus::Running)
+        matches!(
+            self,
+            VpnStatus::Requesting | VpnStatus::Starting | VpnStatus::Running
+        )
     }
 }
 
@@ -103,11 +106,13 @@ pub struct VpnController {
     dns: Arc<DnsMap>,
     /// The relay's own runtime, so a proxy restart does not take the tun down with it.
     runtime: Option<tokio::runtime::Runtime>,
+    relay_task: Option<tokio::task::JoinHandle<()>>,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     /// Why the relay stopped on its own, left here for the next [`VpnController::poll`].
     relay_error: Arc<Mutex<Option<String>>>,
     /// Held between asking for consent and the descriptor arriving.
     pending: Option<CaptureSettings>,
+    starting_at: Option<Instant>,
     /// Foreground notification is up (with or without a tun).
     foreground: bool,
     /// Notification body to fall back to when capture stops but the proxy keeps running.
@@ -127,9 +132,11 @@ impl VpnController {
             stats: Arc::new(VpnStats::default()),
             dns: Arc::new(DnsMap::new(DNS_CAPACITY, DNS_TTL)),
             runtime: None,
+            relay_task: None,
             shutdown: None,
             relay_error: Arc::new(Mutex::new(None)),
             pending: None,
+            starting_at: None,
             foreground: false,
             foreground_detail: String::from("Proxy running"),
         }
@@ -252,18 +259,30 @@ impl VpnController {
         // The relay stopping on its own leaves the service running with a dead tun; the service
         // has to come down with it or the next start would find one already established. Taken
         // either way, so a failure cannot outlive the session that produced it.
-        let relay_error = self.relay_error.lock().ok().and_then(|mut slot| slot.take());
+        let relay_error = self
+            .relay_error
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
         if let Some(reason) = relay_error {
             if self.status.is_on() {
                 self.fail(reason);
             }
         }
 
+        if self.status == VpnStatus::Starting
+            && self
+                .starting_at
+                .is_some_and(|at| at.elapsed() >= Duration::from_secs(15))
+        {
+            self.fail("Android did not start the VPN within 15 seconds. Check VPN settings for another always-on VPN, then tap Capture all traffic to retry.".into());
+        }
+
         before != self.status
     }
 
     /// Put the service back to whatever the proxy still needs, and record why capture stopped.
-    fn fail(&mut self, reason: String) {
+    pub fn fail(&mut self, reason: String) {
         self.pending = None;
         self.teardown();
         self.release_service();
@@ -300,6 +319,7 @@ impl VpnController {
         if platform::start(&config) {
             self.foreground = true;
             self.status = VpnStatus::Starting;
+            self.starting_at = Some(Instant::now());
         } else {
             self.pending = None;
             self.status = VpnStatus::Failed(String::from("Could not start the VPN service."));
@@ -326,7 +346,7 @@ impl VpnController {
             Ok(runtime) => runtime,
             Err(error) => {
                 drop(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
-                self.status = VpnStatus::Failed(format!("Could not start the VPN runtime: {error}"));
+                self.fail(format!("Could not start the VPN runtime: {error}"));
                 return;
             }
         };
@@ -342,18 +362,20 @@ impl VpnController {
 
         let stats = self.stats.clone();
         let dns = self.dns.clone();
+        self.relay_error = Arc::new(Mutex::new(None));
         let failure = self.relay_error.clone();
-        runtime.spawn(async move {
+        self.relay_task = Some(runtime.spawn(async move {
             if let Some(reason) = relay::run(owned, config, stats, dns, shutdown_rx).await {
                 if let Ok(mut slot) = failure.lock() {
                     *slot = Some(reason);
                 }
             }
-        });
+        }));
 
         self.runtime = Some(runtime);
         self.shutdown = Some(shutdown_tx);
         self.status = VpnStatus::Running;
+        self.starting_at = None;
     }
 
     #[cfg(not(unix))]
@@ -362,13 +384,20 @@ impl VpnController {
     }
 
     fn teardown(&mut self) {
+        self.starting_at = None;
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
         if let Some(runtime) = self.runtime.take() {
-            // Waiting for in-flight flows would stall the frame loop; the relay closes the
-            // descriptor as it unwinds.
-            runtime.shutdown_background();
+            let task = self.relay_task.take();
+            // ipstack's TCP destructors synchronously join internal tasks. Drain
+            // them on a live executor before shutdown, away from the UI thread.
+            std::thread::spawn(move || {
+                if let Some(task) = task {
+                    let _ = runtime.block_on(task);
+                }
+                runtime.shutdown_background();
+            });
         }
     }
 }
@@ -379,13 +408,101 @@ impl Drop for VpnController {
     }
 }
 
+#[cfg(all(test, not(target_os = "android")))]
+mod startup_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_with_active_tcp_flows_closes_tun_before_next_capture() {
+        use std::os::fd::IntoRawFd;
+        let mut vpn = VpnController::new();
+        let (device, peer) = std::os::unix::net::UnixDatagram::pair().unwrap();
+        peer.set_nonblocking(true).unwrap();
+        vpn.pending = Some(CaptureSettings {
+            proxy_port: 9,
+            mtu: 1500,
+            capture_ipv6: false,
+            block_quic: true,
+            dns: vec![],
+        });
+        vpn.status = VpnStatus::Starting;
+        vpn.attach(device.into_raw_fd(), 1500);
+        // Minimal IPv4 TCP SYNs. ipstack parses headers without checking checksums.
+        for port in 42000u16..42032 {
+            let mut packet = [0u8; 40];
+            packet[0] = 0x45;
+            packet[2..4].copy_from_slice(&40u16.to_be_bytes());
+            packet[8] = 64;
+            packet[9] = 6;
+            packet[12..16].copy_from_slice(&[10, 7, 0, 2]);
+            packet[16..20].copy_from_slice(&[192, 0, 2, 1]);
+            packet[20..22].copy_from_slice(&port.to_be_bytes());
+            packet[22..24].copy_from_slice(&443u16.to_be_bytes());
+            packet[27] = 1;
+            packet[32] = 0x50;
+            packet[33] = 2;
+            packet[34..36].copy_from_slice(&65535u16.to_be_bytes());
+            peer.send(&packet).unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while vpn.stats().tcp_flows < 32 {
+            assert!(Instant::now() < deadline, "TCP SYNs were not accepted");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        vpn.stop_capture("Proxy running");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Err(error) = peer.send(&[0]) {
+                if error.kind() != std::io::ErrorKind::WouldBlock {
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "stopped VPN retained its tun descriptor"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn missing_service_callback_times_out_and_releases_pending_capture() {
+        let mut vpn = VpnController::new();
+        vpn.status = VpnStatus::Starting;
+        vpn.pending = Some(CaptureSettings {
+            proxy_port: 8100,
+            mtu: 1500,
+            capture_ipv6: false,
+            block_quic: true,
+            dns: vec![],
+        });
+        vpn.starting_at = Some(Instant::now() - Duration::from_secs(16));
+        assert!(vpn.poll());
+        assert!(matches!(vpn.status(), VpnStatus::Failed(reason) if reason.contains("15 seconds")));
+        assert!(vpn.pending.is_none());
+        assert!(!vpn.status().is_on());
+        // A late callback owns a descriptor, which must be closed rather than resurrecting capture.
+        #[cfg(unix)]
+        {
+            use std::io::Read;
+            use std::os::fd::IntoRawFd;
+            let (fd, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+            vpn.attach(fd.into_raw_fd(), 1500);
+            assert_eq!(peer.read(&mut [0; 1]).unwrap(), 0);
+            assert!(matches!(vpn.status(), VpnStatus::Failed(_)));
+        }
+    }
+}
+
 /// The `VpnService` surface, or a stub off Android so the app still builds and tests on the host.
 #[cfg(target_os = "android")]
 mod platform {
     pub use egui_mobile::vpn::{
-        VpnConfig as Config, VpnEvent as Event, blocking_always_on_vpn,
-        open_notification_settings, open_vpn_settings, poll_consent, poll_event, request_consent,
-        start, start_foreground, stop, stop_capture,
+        VpnConfig as Config, VpnEvent as Event, blocking_always_on_vpn, open_notification_settings,
+        open_vpn_settings, poll_consent, poll_event, request_consent, start, start_foreground,
+        stop, stop_capture,
     };
 
     pub const SUPPORTED: bool = true;
