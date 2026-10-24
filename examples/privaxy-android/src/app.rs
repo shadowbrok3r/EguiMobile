@@ -461,30 +461,40 @@ impl PrivaxyApp {
                     },
                 };
                 ui.label(egui::RichText::new(text).size(12.0).color(color));
+
+                let status = loaded.desktop.status();
+                let (text, color) = match &status {
+                    crate::proxy::pairing::ConnectionStatus::Connected => {
+                        ("● Desktop online", ui::GOOD)
+                    }
+                    crate::proxy::pairing::ConnectionStatus::Offline(_) => {
+                        ("● Desktop offline", ui::WARN)
+                    }
+                    crate::proxy::pairing::ConnectionStatus::Checking => {
+                        ("● Desktop checking", ui::WARN)
+                    }
+                    crate::proxy::pairing::ConnectionStatus::Unpaired => {
+                        ("○ Not paired", ui.visuals().weak_text_color())
+                    }
+                };
+                if ui
+                    .add(
+                        egui::Button::selectable(
+                            self.tab == Tab::Pairing,
+                            egui::RichText::new(text).size(12.0).color(color),
+                        )
+                        .truncate(),
+                    )
+                    .on_hover_text(status.label())
+                    .clicked()
+                {
+                    self.tab = Tab::Pairing;
+                }
             });
         });
     }
 
     fn tab_bar(&mut self, ui: &mut egui::Ui, host: &Host) {
-        if let Some(loaded) = &self.loaded {
-            let status = loaded.desktop.status();
-            let color = match status {
-                crate::proxy::pairing::ConnectionStatus::Connected => ui::GOOD,
-                crate::proxy::pairing::ConnectionStatus::Offline(_) => ui::WARN,
-                _ => ui.visuals().weak_text_color(),
-            };
-            if ui
-                .selectable_label(
-                    self.tab == Tab::Pairing,
-                    egui::RichText::new(format!("● {}", status.label()))
-                        .size(12.0)
-                        .color(color),
-                )
-                .clicked()
-            {
-                self.tab = Tab::Pairing;
-            }
-        }
         egui::ScrollArea::horizontal()
             .id_salt("title-tabs")
             .show(ui, |ui| {

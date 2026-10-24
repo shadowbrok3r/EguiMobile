@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.5.8 — 2026-10-24
+
+- Move desktop pairing status into the top row alongside Privaxy and the capture controls, removing the separate status row.
+- Keep the compact status indicator tappable to open Pairing.
+
 ## v0.5.7 — 2026-10-24
 
 - Open Privaxy directly from desktop pairing QR links, with a review before pairing.
