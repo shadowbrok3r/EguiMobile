@@ -105,7 +105,7 @@ impl DesktopPairing {
         let connect = async {
             let tcp = tokio::net::TcpStream::connect((self.host.as_str(), self.port))
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| self.connection_error(&e))?;
             let name = rustls_pki_types::ServerName::try_from("privaxy-desktop").unwrap();
             let mut config = self.tls_config()?;
             if status {
@@ -137,7 +137,23 @@ impl DesktopPairing {
             connect,
         )
         .await
-        .map_err(|_| "Desktop connection timed out")?
+        .map_err(|_| format!("Desktop {}:{} did not respond in time. Check that the relay is running and TCP port {} is allowed from the phone's network. Your pairing is still saved.", self.host, self.port, self.port))?
+    }
+
+    fn connection_error(&self, error: &std::io::Error) -> String {
+        let help = match error.kind() {
+            std::io::ErrorKind::HostUnreachable | std::io::ErrorKind::NetworkUnreachable => {
+                "The network cannot reach this desktop. Check Wi-Fi client/guest isolation and the desktop firewall. If the desktop uses a Tailscale exit node, enable Allow LAN access there."
+            }
+            std::io::ErrorKind::ConnectionRefused => {
+                "The connection was refused. Start Android relay on the desktop and check the relay port."
+            }
+            _ => "Check the desktop address, relay, and network connection.",
+        };
+        format!(
+            "Cannot connect to {}:{}: {error}. {help} Your pairing is still saved.",
+            self.host, self.port
+        )
     }
 }
 
@@ -155,7 +171,7 @@ impl ConnectionStatus {
             Self::Unpaired => "Desktop: not paired",
             Self::Checking => "Desktop: checking",
             Self::Connected => "Desktop: connected · paired",
-            Self::Offline(_) => "Desktop: offline · pairing saved",
+            Self::Offline(_) => "Desktop: unreachable · pairing saved",
         }
     }
 }
@@ -169,6 +185,10 @@ pub struct ConnectionMonitor {
 impl ConnectionMonitor {
     pub fn status(&self) -> ConnectionStatus {
         self.status.lock().unwrap().clone()
+    }
+    pub fn retry(&mut self) {
+        let pair = self.pair.take();
+        self.sync(pair.as_ref());
     }
     pub fn sync(&mut self, pair: Option<&DesktopPairing>) {
         if self.pair.as_ref() == pair {

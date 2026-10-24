@@ -58,7 +58,16 @@ pub fn pairing(app: &mut PrivaxyApp, ui: &mut egui::Ui, _host: &Host) {
         let status = loaded.desktop.status();
         ui.label(status.label());
         if let crate::proxy::pairing::ConnectionStatus::Offline(reason) = &status {
-            ui.label(reason);
+            ui.label(egui::RichText::new(reason).color(ui::WARN));
+        }
+        if ui
+            .add_enabled(
+                loaded.config.desktop_pairing.is_some(),
+                egui::Button::new("Check connection"),
+            )
+            .clicked()
+        {
+            loaded.desktop.retry();
         }
         ui.label("Desktop IP or hostname");
         ui.add(

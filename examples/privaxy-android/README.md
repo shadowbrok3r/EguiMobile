@@ -21,9 +21,14 @@ Android Back, or tapping outside keeps the pairing; only **Forget pairing** remo
 it and disables desktop routing.
 
 The top bar contains navigation and a live connection indicator. **Connected · paired**
-means pinned TLS authentication and a heartbeat succeeded. **Offline · pairing saved**
+means pinned TLS authentication and a heartbeat succeeded. **Unreachable · pairing saved**
 means the credentials are remembered but the desktop is not responding; the reason
-appears on Pairing and retries are automatic. Idle phones remain visible on desktop.
+appears on Pairing and retries are automatic. **Check connection** retries immediately
+without forgetting the pairing. Connection errors include the saved IP and relay port,
+with specific guidance for unreachable, refused, and timed-out connections.
+For **No route to host**, check Wi-Fi client isolation and the desktop firewall for
+TCP 8101; if the desktop uses a Tailscale exit node, enable **Allow LAN access** there.
+Saved pairing does not prove current network reachability. Idle phones remain visible on desktop.
 The status connection is separate from HTTP traffic and does not enable routing by itself.
 
 Enable desktop routing and, on LAN, **Capture all traffic** for device-wide capture.
