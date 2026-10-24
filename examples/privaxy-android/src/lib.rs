@@ -17,7 +17,18 @@ pub mod vpn;
 // egui paint callback, and only egui_glow dispatches those. This app uses no plugin viewports, so
 // it gives up nothing by switching.
 #[cfg(target_os = "android")]
-egui_mobile::app!(app::PrivaxyApp::new, egui_mobile::Backend::Glow);
+#[unsafe(no_mangle)]
+fn android_main(app: android_activity::AndroidApp) {
+    let sink = android_logger::AndroidLogger::new(
+        android_logger::Config::default()
+            .with_tag("Privaxy")
+            .with_max_level(log::LevelFilter::Trace),
+    );
+    let _ = privaxy_diagnostics::init(Some(Box::new(sink)));
+    egui_mobile::run_with(app, egui_mobile::Backend::Glow, |cc| {
+        Box::new(app::PrivaxyApp::new(cc))
+    });
+}
 
 #[cfg(target_os = "ios")]
 egui_mobile::app!(app::PrivaxyApp::new);

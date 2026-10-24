@@ -37,7 +37,9 @@ pub enum FiltersStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventKind {
-    Blocked { filter: String },
+    Blocked {
+        filter: String,
+    },
     /// Passed through byte for byte: hostname-only mode, or a never-intercept host.
     Tunneled,
     /// TLS interception was attempted; consult the exchange for its outcome.
@@ -237,6 +239,11 @@ impl ProxyState {
     }
 
     pub fn set_status(&self, status: Status) {
+        if let Status::Failed(reason) = &status {
+            log::error!("Proxy failed: {reason}");
+        } else {
+            log::info!("Proxy state: {status:?}");
+        }
         if let Ok(mut guard) = self.status.lock() {
             *guard = status;
         }

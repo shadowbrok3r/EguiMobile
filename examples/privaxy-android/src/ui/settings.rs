@@ -69,6 +69,10 @@ pub fn pairing(app: &mut PrivaxyApp, ui: &mut egui::Ui, _host: &Host) {
         {
             loaded.desktop.retry();
         }
+        if ui.button("View diagnostic logs").clicked() {
+            app.logs.open = true;
+            app.tab = super::Tab::Settings;
+        }
         ui.label("Desktop IP or hostname");
         ui.add(
             egui::TextEdit::singleline(&mut app.desktop_host)
@@ -194,6 +198,8 @@ pub fn forget_desktop_confirmation(app: &mut PrivaxyApp, ctx: &egui::Context) {
 }
 
 pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
+    super::diagnostics::show(app, ui);
+    ui.add_space(10.0);
     let Some(loaded) = app.loaded.as_mut() else {
         return;
     };

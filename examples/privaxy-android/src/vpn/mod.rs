@@ -184,6 +184,7 @@ impl VpnController {
 
     /// Ask for VPN consent if it is not already granted, then capture.
     pub fn start_capture(&mut self, settings: CaptureSettings) {
+        log::info!("VPN capture requested; current={:?}", self.status);
         if self.status.is_on() {
             return;
         }
@@ -201,6 +202,7 @@ impl VpnController {
 
     /// Close the tun, leaving the foreground notification up for the proxy.
     pub fn stop_capture(&mut self, detail: &str) {
+        log::info!("VPN capture stop requested");
         self.foreground_detail = detail.to_owned();
         self.pending = None;
         self.teardown();
@@ -278,11 +280,15 @@ impl VpnController {
             self.fail("Android did not start the VPN within 15 seconds. Check VPN settings for another always-on VPN, then tap Capture all traffic to retry.".into());
         }
 
+        if before != self.status {
+            log::info!("VPN state {:?} -> {:?}", before, self.status);
+        }
         before != self.status
     }
 
     /// Put the service back to whatever the proxy still needs, and record why capture stopped.
     pub fn fail(&mut self, reason: String) {
+        log::error!("VPN capture failed: {reason}");
         self.pending = None;
         self.teardown();
         self.release_service();

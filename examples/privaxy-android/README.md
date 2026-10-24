@@ -44,6 +44,25 @@ Starting state. Waiting for the system permission dialog does not time out.
 Capture shutdown drains TCP tasks before stopping their executor; otherwise ipstack
 can deadlock while dropping streams and leave the VPN interface open.
 
+## Diagnostic logs
+
+Open **Settings → Diagnostic logs**, or **Pairing → View diagnostic logs**. Choose
+Error, Warn, Info, Debug or Trace; the selected level and higher severities are
+recorded. The level survives app restarts. Search by message/source, pause the view,
+or clear the visible ring without deleting the persistent files. **Export logs**
+saves the current and previous files to Downloads, including prior app runs.
+
+Info includes startup, proxy/VPN state and desktop connect/disconnect events. Debug
+adds TCP local/remote addresses, TLS verification and pairing authentication stages;
+Trace adds heartbeat round-trip time. Endpoint-specific failures name their stage.
+Diagnostic events exclude pairing tokens and request/response payloads; they do
+include endpoint addresses and transport errors. Private storage rotates two 5 MiB
+files, the in-app ring holds 5,000 entries, and queue drops/file failures are visible.
+The same events are mirrored to Logcat with tag `Privaxy`.
+
+For intermittent desktop connections, select **Trace** on both devices, reproduce
+the failure, then export both logs. UTC timestamps allow the two sides to be aligned.
+
 ## What changed from the desktop server
 
 | Desktop privaxy | Here | Why |

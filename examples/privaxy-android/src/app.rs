@@ -239,6 +239,7 @@ impl Loaded {
 }
 
 pub struct PrivaxyApp {
+    pub logs: ui::diagnostics::LogView,
     pub loaded: Option<Loaded>,
     pub init_error: Option<String>,
     pub tab: Tab,
@@ -295,7 +296,7 @@ impl PrivaxyApp {
         }
         let (tx, rx) = std::sync::mpsc::channel();
         self.file_job = Some(rx);
-        self.notice = Some("Saving capture data…".into());
+        self.notice = Some("Saving file…".into());
         std::thread::spawn(move || {
             let _ = tx.send(job());
         });
@@ -329,6 +330,7 @@ impl PrivaxyApp {
 
     pub fn new(_cc: &CreateContext) -> Self {
         Self {
+            logs: Default::default(),
             loaded: None,
             init_error: None,
             tab: Tab::Dashboard,
@@ -368,6 +370,10 @@ impl PrivaxyApp {
         };
 
         let paths = Paths::new(directory);
+        if let Err(error) = privaxy_diagnostics::attach_file(&paths.root.join("logs/android.log")) {
+            self.notice = Some(format!("Cannot open diagnostic log: {error}"));
+        }
+        log::info!("Privaxy Android {} starting", env!("CARGO_PKG_VERSION"));
         match paths.load_or_create() {
             Ok(config) => {
                 self.port_text = config.listen_port.to_string();

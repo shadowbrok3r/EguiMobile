@@ -92,9 +92,13 @@ impl DesktopPairing {
     }
     pub async fn relay(&self, mut local: tokio::net::TcpStream) -> Result<(), String> {
         let mut remote = self.connect(false).await?;
-        tokio::io::copy_bidirectional(&mut local, &mut remote)
+        let (up, down) = tokio::io::copy_bidirectional(&mut local, &mut remote)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                log::warn!("Desktop traffic relay failed: {e}");
+                e.to_string()
+            })?;
+        log::debug!("Desktop traffic relay closed uploaded={up} downloaded={down}");
         Ok(())
     }
     async fn connect(
@@ -102,10 +106,24 @@ impl DesktopPairing {
         status: bool,
     ) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>, String> {
         self.validate()?;
+        let started = std::time::Instant::now();
+        let stage = std::sync::atomic::AtomicUsize::new(0);
+        log::debug!(
+            "Desktop connect endpoint={}:{} status_channel={status}",
+            self.host,
+            self.port
+        );
         let connect = async {
             let tcp = tokio::net::TcpStream::connect((self.host.as_str(), self.port))
                 .await
                 .map_err(|e| self.connection_error(&e))?;
+            log::debug!(
+                "Desktop TCP connected local={:?} peer={:?} elapsed_ms={}",
+                tcp.local_addr().ok(),
+                tcp.peer_addr().ok(),
+                started.elapsed().as_millis()
+            );
+            stage.store(1, std::sync::atomic::Ordering::Relaxed);
             let name = rustls_pki_types::ServerName::try_from("privaxy-desktop").unwrap();
             let mut config = self.tls_config()?;
             if status {
@@ -114,7 +132,12 @@ impl DesktopPairing {
             let mut remote = tokio_rustls::TlsConnector::from(Arc::new(config))
                 .connect(name, tcp)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| format!("Desktop TLS handshake: {e}"))?;
+            log::debug!(
+                "Desktop TLS verified elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
+            stage.store(2, std::sync::atomic::Ordering::Relaxed);
             if status && remote.get_ref().1.alpn_protocol() != Some(b"privaxy-status-v1") {
                 return Err("Update Privaxy desktop to enable connection status".into());
             }
@@ -130,14 +153,30 @@ impl DesktopPairing {
             if ack != *b"OK" {
                 return Err("Desktop rejected pairing; pair again".into());
             }
+            log::debug!(
+                "Desktop pairing authenticated elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
             Ok::<_, String>(remote)
         };
-        tokio::time::timeout(
+        let result = tokio::time::timeout(
             std::time::Duration::from_secs(if status { 5 } else { 15 }),
             connect,
         )
         .await
-        .map_err(|_| format!("Desktop {}:{} did not respond in time. Check that the relay is running and TCP port {} is allowed from the phone's network. Your pairing is still saved.", self.host, self.port, self.port))?
+        .map_err(|_| format!("Desktop {}:{} timed out during {}. Check that the relay is running and reachable. Your pairing is still saved.", self.host, self.port, ["TCP connection", "TLS handshake", "Pairing authentication"][stage.load(std::sync::atomic::Ordering::Relaxed)]))
+        .and_then(|result| result);
+        if let Err(error) = &result {
+            log::warn!(
+                "Desktop connection failed endpoint={}:{} stage={} elapsed_ms={}: {error}",
+                self.host,
+                self.port,
+                ["TCP connection", "TLS handshake", "Pairing authentication"]
+                    [stage.load(std::sync::atomic::Ordering::Relaxed)],
+                started.elapsed().as_millis()
+            );
+        }
+        result
     }
 
     fn connection_error(&self, error: &std::io::Error) -> String {
@@ -187,6 +226,7 @@ impl ConnectionMonitor {
         self.status.lock().unwrap().clone()
     }
     pub fn retry(&mut self) {
+        log::info!("Desktop connection retry requested");
         let pair = self.pair.take();
         self.sync(pair.as_ref());
     }
@@ -197,6 +237,10 @@ impl ConnectionMonitor {
         if let Some(rt) = self.runtime.take() {
             rt.shutdown_background();
         }
+        log::info!(
+            "Desktop monitor configuration changed paired={}",
+            pair.is_some()
+        );
         self.pair = pair.cloned();
         // Use a fresh status cell so a cancelled old connection cannot overwrite the new one.
         self.status = Arc::default();
@@ -221,7 +265,14 @@ impl ConnectionMonitor {
             loop {
                 let result = async {
                     let mut stream = pair.connect(true).await?;
+                    let connected_at = std::time::Instant::now();
+                    log::info!(
+                        "Desktop connected and pairing verified endpoint={}:{}",
+                        pair.host,
+                        pair.port
+                    );
                     loop {
+                        let ping_at = std::time::Instant::now();
                         let ping = async {
                             stream.write_all(b"P").await?;
                             stream.flush().await?;
@@ -234,6 +285,13 @@ impl ConnectionMonitor {
                             .await
                             .map_err(|_| "Desktop stopped responding".to_owned())?
                             .map_err(|e| e.to_string())?;
+                        log::trace!(
+                            "Desktop heartbeat endpoint={}:{} rtt_ms={} connected_secs={}",
+                            pair.host,
+                            pair.port,
+                            ping_at.elapsed().as_millis(),
+                            connected_at.elapsed().as_secs()
+                        );
                         *status.lock().unwrap() = ConnectionStatus::Connected;
                         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     }
@@ -241,7 +299,9 @@ impl ConnectionMonitor {
                     Ok::<(), String>(())
                 }
                 .await;
-                *status.lock().unwrap() = ConnectionStatus::Offline(result.unwrap_err());
+                let error = result.unwrap_err();
+                log::warn!("Desktop monitor offline: {error}; retry in 3s");
+                *status.lock().unwrap() = ConnectionStatus::Offline(error);
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             }
         });

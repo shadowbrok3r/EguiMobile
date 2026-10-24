@@ -5563,10 +5563,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "privaxy-diagnostics"
+version = "0.1.0"
+source = "git+https://github.com/shadowbrok3r/privaxy?rev=ae98d41ed120d43310c8d0d6bce43b658dbb9f62#ae98d41ed120d43310c8d0d6bce43b658dbb9f62"
+dependencies = [
+ "chrono",
+ "log",
+]
+
+[[package]]
 name = "privaxy_android"
-version = "0.5.10"
+version = "0.5.11"
 dependencies = [
  "adblock",
+ "android-activity",
+ "android_logger",
  "backdrop-blur-egui",
  "base64 0.22.1",
  "bytes",
@@ -5585,6 +5596,7 @@ dependencies = [
  "log",
  "lol_html",
  "ndk-context",
+ "privaxy-diagnostics",
  "rcgen",
  "regex",
  "reqwest",

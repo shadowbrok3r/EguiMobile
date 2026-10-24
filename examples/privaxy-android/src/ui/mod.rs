@@ -2,6 +2,7 @@
 
 pub mod chips;
 pub mod dashboard;
+pub mod diagnostics;
 pub mod filters;
 pub mod frost;
 pub mod icons;
