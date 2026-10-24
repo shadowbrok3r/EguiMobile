@@ -16,6 +16,9 @@ and tap **Pair desktop**. Pasting a new link or an older pairing code also works
 A new desktop needs its pairing code once; an IP alone cannot establish its identity.
 Edit **Desktop IP or hostname** and **Relay port**, then **Save address** to change
 the address of an already paired desktop while keeping its certificate and token.
+**Forget desktop** opens a confirmation dialog showing the saved address. Cancel,
+Android Back, or tapping outside keeps the pairing; only **Forget pairing** removes
+it and disables desktop routing.
 
 The top bar contains navigation and a live connection indicator. **Connected · paired**
 means pinned TLS authentication and a heartbeat succeeded. **Offline · pairing saved**

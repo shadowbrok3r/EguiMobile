@@ -112,16 +112,76 @@ pub fn pairing(app: &mut PrivaxyApp, ui: &mut egui::Ui, _host: &Host) {
             }
             ui.label("On LAN, enable Capture all traffic on Dashboard. With Tailscale, use proxy-only mode and configure supported apps to use 127.0.0.1:8100; keep Privaxy included in Tailscale routing. Desktop performs inspection using its CA. DNS and UDP remain direct. TCP fails if the desktop is unavailable.");
             if ui.button("Forget desktop").clicked() {
-                loaded.config.desktop_enabled = false;
-                loaded.config.desktop_pairing = None;
-                if let Err(e) = loaded.save() {
-                    app.notice = Some(e);
-                }
-                loaded.restart_proxy();
+                app.forget_desktop = loaded.config.desktop_pairing.clone();
             }
         }
     });
     ui.add_space(10.0);
+}
+
+pub fn forget_desktop_confirmation(app: &mut PrivaxyApp, ctx: &egui::Context) {
+    let Some(pair) = app.forget_desktop.as_ref() else {
+        return;
+    };
+    // A new deep link or pairing must never be erased by an older confirmation.
+    if app
+        .loaded
+        .as_ref()
+        .and_then(|loaded| loaded.config.desktop_pairing.as_ref())
+        != Some(pair)
+        || ui::back_pressed(ctx)
+    {
+        app.forget_desktop = None;
+        return;
+    }
+
+    let modal = egui::Modal::new(egui::Id::unique("forget_desktop_confirmation")).show(ctx, |ui| {
+        ui.set_width((ctx.content_rect().width() - 48.0).clamp(0.0, 360.0));
+        ui.heading("Forget desktop pairing?");
+        ui.add_space(8.0);
+        ui.label(format!("Desktop: {}:{}", pair.host, pair.port));
+        ui.label("This removes the saved pairing and turns off desktop routing. You'll need to scan or paste the desktop pairing code again to reconnect.");
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            let width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+            let height = ui.spacing().interact_size.y;
+            let cancel = ui.add_sized([width, height], egui::Button::new("Cancel")).clicked();
+            let forget = ui.add_sized(
+                [width, height],
+                egui::Button::new(egui::RichText::new("Forget pairing").color(ui::BAD)),
+            ).clicked();
+            (cancel, forget)
+        }).inner
+    });
+    if modal.inner.0 || modal.should_close() {
+        app.forget_desktop = None;
+        return;
+    }
+    if !modal.inner.1 {
+        return;
+    }
+
+    let pairing = app.forget_desktop.take();
+    let Some(loaded) = app.loaded.as_mut() else {
+        return;
+    };
+    let was_enabled = loaded.config.desktop_enabled;
+    loaded.config.desktop_enabled = false;
+    loaded.config.desktop_pairing = None;
+    if let Err(error) = loaded.save() {
+        loaded.config.desktop_pairing = pairing;
+        loaded.config.desktop_enabled = was_enabled;
+        app.notice = Some(format!("Could not forget desktop: {error}"));
+        return;
+    }
+    loaded.desktop.sync(None);
+    if was_enabled && loaded.proxy.is_some() {
+        loaded.restart_proxy();
+    }
+    app.pairing_draft.clear();
+    app.desktop_host.clear();
+    app.desktop_port = "8101".into();
+    app.notice = Some("Desktop pairing forgotten. Desktop routing is off.".into());
 }
 
 pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {

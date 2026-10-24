@@ -245,6 +245,7 @@ pub struct PrivaxyApp {
 
     // Text buffers the settings and filter screens edit, flushed into the config on save.
     pub pairing_draft: String,
+    pub forget_desktop: Option<crate::proxy::pairing::DesktopPairing>,
     pub desktop_host: String,
     pub desktop_port: String,
     pub port_text: String,
@@ -332,6 +333,7 @@ impl PrivaxyApp {
             init_error: None,
             tab: Tab::Dashboard,
             pairing_draft: String::new(),
+            forget_desktop: None,
             desktop_host: String::new(),
             desktop_port: "8101".into(),
             port_text: String::new(),
@@ -599,6 +601,7 @@ impl PrivaxyApp {
             if let Some(uri) = host.take_view_intent() {
                 match crate::proxy::pairing::DesktopPairing::parse(&uri) {
                     Ok(pair) => {
+                        self.forget_desktop = None;
                         self.desktop_host = pair.host;
                         self.desktop_port = pair.port.to_string();
                         self.pairing_draft = uri;
@@ -731,6 +734,8 @@ impl PrivaxyApp {
                         Tab::Pairing => ui::settings::pairing(self, ui, host),
                     });
             });
+
+        ui::settings::forget_desktop_confirmation(self, ui.ctx());
 
         // Persist the log's filters and the wrap toggle when they change, so they survive a
         // restart. Compared rather than written every frame: this is a whole-config JSON write.
