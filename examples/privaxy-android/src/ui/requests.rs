@@ -252,9 +252,12 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
     let Some(state) = app.loaded.as_ref().map(|loaded| loaded.state.clone()) else {
         return;
     };
-    let desktop_routing = app.loaded.as_ref().is_some_and(|loaded| loaded.config.desktop_enabled);
+    let desktop_routing = app
+        .loaded
+        .as_ref()
+        .is_some_and(|loaded| loaded.config.desktop_enabled);
     if desktop_routing {
-        ui.label("Desktop routing is enabled. Open Requests on desktop for captured URLs and inspection; relay failures appear here.");
+        ui.label("Desktop routing is enabled. Open Traffic on desktop for captured URLs and inspection; relay failures appear here.");
     }
     let mut refresh = false;
     let mut save = false;
@@ -295,6 +298,9 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                     .width((width - 20.0).min(420.0))
                     .show(|ui| {
                         egui::ScrollArea::vertical()
+                            .scroll_bar_visibility(
+                                egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
+                            )
                             .id_salt("request_filters_popup")
                             .max_height(ui.ctx().content_rect().height() * 0.65)
                             .show(ui, |ui| filter_panel(&mut app.request_filters, ui));

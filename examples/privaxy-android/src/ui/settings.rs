@@ -5,6 +5,18 @@ use crate::proxy::ca::CertAuthority;
 use crate::ui;
 use egui_mobile::{Haptic, Host, egui};
 
+pub(super) fn desktop_ca_help(ui: &mut egui::Ui) {
+    ui.strong("Inspection runs on the desktop");
+    ui.label("This phone needs the desktop's inspection CA. The Android CA is separate; pairing only verifies the relay connection.");
+    ui.collapsing("Install the desktop CA on this phone", |ui| {
+        ui.label("1. Desktop: Dashboard > Export inspection CA.");
+        ui.label("2. Copy privaxy-desktop-ca.crt to this phone.");
+        ui.label("3. Android Settings > Security > Install a certificate > CA certificate. You can keep both CAs installed.");
+        ui.label("Some apps reject user-installed CAs or pin certificates even after installation.");
+    });
+    ui.label(egui::RichText::new("Desktop CA installation is not checked here.").color(ui::WARN));
+}
+
 pub fn pairing(app: &mut PrivaxyApp, ui: &mut egui::Ui, _host: &Host) {
     let Some(loaded) = app.loaded.as_mut() else {
         return;
@@ -124,6 +136,9 @@ pub fn pairing(app: &mut PrivaxyApp, ui: &mut egui::Ui, _host: &Host) {
                 loaded.restart_proxy();
             }
             ui.label("On LAN, enable Capture all traffic on Dashboard. With Tailscale, use proxy-only mode and configure supported apps to use 127.0.0.1:8100; keep Privaxy included in Tailscale routing. Desktop performs inspection using its CA. DNS and UDP remain direct. TCP fails if the desktop is unavailable.");
+            if loaded.config.desktop_enabled {
+                desktop_ca_help(ui);
+            }
             if ui.button("Forget desktop").clicked() {
                 app.forget_desktop = loaded.config.desktop_pairing.clone();
             }
@@ -376,7 +391,11 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
     ui.add_space(10.0);
 
     ui::card(ui, |ui| {
-        ui::section_title(ui, "Certificate authority");
+        ui::section_title(ui, "Android inspection CA");
+        if loaded.config.desktop_enabled && loaded.config.desktop_pairing.is_some() {
+            desktop_ca_help(ui);
+            ui.separator();
+        }
         ui.add_space(6.0);
         let certificate = &loaded.certificate_check.status;
         ui.label(egui::RichText::new(certificate.label()).size(12.0).color(
@@ -388,7 +407,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                 ui.visuals().weak_text_color()
             },
         ));
-        ui.label(egui::RichText::new("Installation is checked for this Android profile. Each client app still chooses which CAs it trusts; actual rejections appear in Requests > Failed.").size(12.0).color(ui.visuals().weak_text_color()));
+        ui.label(egui::RichText::new("This checks the Android app's own CA only, used for local inspection. It does not check the desktop CA. Each client app chooses which CAs it trusts; actual rejections appear in Requests > Failed.").size(12.0).color(ui.visuals().weak_text_color()));
         if ui.button("Check certificate again").clicked() {
             loaded.certificate_check.invalidate();
             loaded.certificate_check.update(&loaded.config.ca);

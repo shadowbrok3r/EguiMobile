@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.5.12 — 2026-10-24
+
+- Keep scroll handles visible with a wider, contrasting track in requests and inspection.
+- Explain which CA is needed when routing through a desktop, with installation steps on the phone.
+- Show desktop inspection guidance instead of local-only inspection controls when desktop routing is active.
+
 ## v0.5.8 — 2026-10-24
 
 - Move desktop pairing status into the top row alongside Privaxy and the capture controls, removing the separate status row.

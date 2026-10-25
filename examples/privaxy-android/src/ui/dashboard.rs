@@ -87,6 +87,11 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
         ui::section_title(ui, "Interception");
         ui.add_space(6.0);
 
+        if loaded.config.desktop_enabled && loaded.config.desktop_pairing.is_some() {
+            super::settings::desktop_ca_help(ui);
+            return;
+        }
+
         let mut mode = loaded.config.mode;
         ui.horizontal(|ui| {
             let width = (ui.available_width() - 8.0) / 2.0;

@@ -2,7 +2,7 @@
 name = "privaxy_android"
 # Android versionCode is derived from this: (1<<24)|(major<<16)|(minor<<8)|patch.
 # Bump before every release build — the phone only offers an update whose code is strictly greater.
-version = "0.5.11"
+version = "0.5.12"
 edition = "2024"
 publish = false
 

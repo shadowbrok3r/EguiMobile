@@ -293,6 +293,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
     match app.inspect_tab {
         InspectTab::Overview => {
             egui::ScrollArea::vertical()
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
                 .id_salt("overview")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {

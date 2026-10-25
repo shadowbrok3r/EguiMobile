@@ -595,6 +595,12 @@ impl PrivaxyApp {
                 .apply(ui.ctx(), egui_mobile::theme::Density::Touch);
         }
         ui::paint_backdrop(ui.ctx());
+        ui.style_mut().spacing.scroll = egui::style::ScrollStyle {
+            bar_width: 10.0,
+            handle_min_length: 36.0,
+            foreground_color: true,
+            ..egui::style::ScrollStyle::solid()
+        };
         // Before anything paints into the chrome rects — the grab-pass blurs whatever is already
         // in the framebuffer where it lands.
         ui::frost::frost_chrome(ui);
