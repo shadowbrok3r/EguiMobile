@@ -235,6 +235,8 @@ pub struct Config {
     #[serde(default)]
     pub desktop_pairing: Option<super::pairing::DesktopPairing>,
     #[serde(default)]
+    pub desktop_ca: Option<super::desktop_ca::DesktopCa>,
+    #[serde(default)]
     pub desktop_enabled: bool,
     #[serde(default)]
     pub appearance: egui_mobile::theme::ThemeConfig,
@@ -298,6 +300,7 @@ impl Config {
     fn new(ca: CertAuthority) -> Self {
         Self {
             desktop_pairing: None,
+            desktop_ca: None,
             desktop_enabled: false,
             appearance: Default::default(),
             listen_port: 8100,
@@ -324,6 +327,10 @@ impl Config {
 
     pub fn enabled_filters(&self) -> impl Iterator<Item = &Filter> {
         self.filters.iter().filter(|filter| filter.enabled)
+    }
+    pub fn paired_ca(&self) -> Option<&super::desktop_ca::DesktopCa> {
+        let pair = self.desktop_pairing.as_ref()?;
+        self.desktop_ca.as_ref().filter(|ca| ca.belongs_to(pair))
     }
 
     /// Resolver addresses for the tun, ignoring blank entries in the stored list.
@@ -391,6 +398,11 @@ impl Paths {
     pub fn export_ca(&self, config: &Config) -> Result<PathBuf, ConfigError> {
         std::fs::write(&self.ca_export, config.ca.certificate_pem.as_bytes())?;
         Ok(self.ca_export.clone())
+    }
+    pub fn export_desktop_ca(&self, ca: &super::desktop_ca::DesktopCa) -> Result<PathBuf, String> {
+        let path = self.root.join(ca.export_filename()?);
+        std::fs::write(&path, ca.pem()).map_err(|error| error.to_string())?;
+        Ok(path)
     }
 
     /// Writes the request log as HAR 1.2. Timestamped, so successive captures coexist rather than

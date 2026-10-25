@@ -51,10 +51,13 @@ impl CertificateCheck {
     }
 
     pub fn update(&mut self, ca: &CertAuthority) {
-        if self.pem != ca.certificate_pem {
+        self.update_pem(&ca.certificate_pem);
+    }
+    pub fn update_pem(&mut self, pem: &str) {
+        if self.pem != pem {
             // Drop an old in-flight result when the CA changes; it cannot verify the new CA.
             self.pending = None;
-            self.pem.clone_from(&ca.certificate_pem);
+            self.pem = pem.to_owned();
             self.checked_at = None;
             self.status = CertificateStatus::Checking;
         }

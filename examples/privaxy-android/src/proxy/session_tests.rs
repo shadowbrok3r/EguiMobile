@@ -76,6 +76,12 @@ impl Harness {
                             .headers_mut()
                             .insert(header::CONTENT_TYPE, "text/html".parse().unwrap());
                         response
+                    } else if path == "/html" {
+                        Response::builder()
+                            .header(header::CONTENT_TYPE, "text/html")
+                            .header(header::CONTENT_LENGTH, bytes.len())
+                            .body(full_body(bytes))
+                            .unwrap()
                     } else if path == "/empty" {
                         Response::new(empty_body())
                     } else if h2 {
@@ -414,4 +420,32 @@ async fn full_inspection_allows_connect_before_blocking_the_inner_request() {
                 .any(|(k, v)| k == "x-capture-proof" && v == "inner-request")
         );
     }
+}
+
+#[tokio::test]
+async fn observe_only_allows_blocked_hosts_without_rewriting_html_and_still_captures() {
+    let h = Harness::new(false).await;
+    h.session
+        .engine
+        .replace(&["||localhost^\nlocalhost##.ad".into()]);
+    let url = format!("{}/html", h.origin);
+    let blocked = h.client.post(&url).body("blocked").send().await.unwrap();
+    assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+    h.session.engine.set_enabled(false);
+    let html = "<!DOCTYPE html>\n<html><body><DIV class='ad' >  keep me </DIV></body></html>";
+    let response = h.client.post(&url).body(html).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::ALT_SVC], "h3=\":443\"");
+    assert_eq!(
+        response.headers()[header::CONTENT_LENGTH],
+        html.len().to_string()
+    );
+    assert_eq!(response.text().await.unwrap(), html);
+    let events = h.session.state.recent_events(20);
+    let event = events.iter().find(|e| e.url == url && !matches!(&e.kind, EventKind::Blocked { .. })).unwrap();
+    let exchange = event.exchange.lock().unwrap();
+    assert_eq!(
+        exchange.response_body.snapshot().read_range(0, html.len()).unwrap(),
+        html.as_bytes()
+    );
 }

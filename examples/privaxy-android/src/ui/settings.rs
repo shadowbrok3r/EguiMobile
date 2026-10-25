@@ -1,20 +1,122 @@
 //! Listener settings, the certificate authority, and pass-through hosts.
 
-use crate::app::PrivaxyApp;
+use crate::app::{Loaded, PrivaxyApp};
 use crate::proxy::ca::CertAuthority;
 use crate::ui;
+use egui_icon_pack::{phosphor_regular as svg, widgets as icons};
 use egui_mobile::{Haptic, Host, egui};
 
-pub(super) fn desktop_ca_help(ui: &mut egui::Ui) {
-    ui.strong("Inspection runs on the desktop");
-    ui.label("This phone needs the desktop's inspection CA. The Android CA is separate; pairing only verifies the relay connection.");
-    ui.collapsing("Install the desktop CA on this phone", |ui| {
-        ui.label("1. Desktop: Dashboard > Export inspection CA.");
-        ui.label("2. Copy privaxy-desktop-ca.crt to this phone.");
-        ui.label("3. Android Settings > Security > Install a certificate > CA certificate. You can keep both CAs installed.");
-        ui.label("Some apps reject user-installed CAs or pin certificates even after installation.");
-    });
-    ui.label(egui::RichText::new("Desktop CA installation is not checked here.").color(ui::WARN));
+pub(super) fn desktop_ca_help(
+    loaded: &mut Loaded,
+    ui: &mut egui::Ui,
+    host: &Host,
+) -> Option<String> {
+    use crate::certificate::CertificateStatus;
+    use crate::proxy::desktop_ca::CaTransfer;
+    icons::label(
+        ui,
+        svg::CERTIFICATE,
+        egui::RichText::new("Desktop inspection CA").strong(),
+    );
+    let transfer = loaded.desktop.ca_transfer();
+    match &transfer {
+        CaTransfer::Unsupported => {
+            ui.colored_label(
+                ui::WARN,
+                "Update Privaxy desktop to receive its inspection CA automatically.",
+            );
+        }
+        CaTransfer::Failed(error) => {
+            ui.colored_label(
+                ui::WARN,
+                format!("Could not receive the desktop CA: {error}"),
+            );
+        }
+        CaTransfer::Waiting if loaded.config.paired_ca().is_none() => {
+            ui.label("The certificate will download automatically when the desktop connects.");
+        }
+        _ => {}
+    }
+    let mut notice = None;
+    if let Some(ca) = loaded.config.paired_ca().cloned() {
+        let installed = loaded.desktop_certificate_check.status == CertificateStatus::Installed;
+        let color = if installed {
+            ui::GOOD
+        } else if loaded.desktop_certificate_check.status.is_problem() {
+            ui::WARN
+        } else {
+            ui.visuals().text_color()
+        };
+        ui.colored_label(color, loaded.desktop_certificate_check.status.label());
+        if loaded.desktop.status() != crate::proxy::pairing::ConnectionStatus::Connected {
+            ui.label("Saved certificate. Reconnect to check whether the desktop CA has changed.");
+        }
+        if !installed {
+            if let Ok(filename) = ca.export_filename() {
+                ui.label(format!("File: {filename}"));
+            }
+            ui.label("Save it to Downloads, then install it in Android Settings > Security > Install a certificate > CA certificate. Normally needed only once per desktop CA.");
+        }
+        ui.horizontal_wrapped(|ui| {
+            let label = if installed {
+                "Save CA to Downloads"
+            } else {
+                "Install desktop CA"
+            };
+            if icons::button(ui, svg::DOWNLOAD_SIMPLE, label).clicked() {
+                notice = Some(match save_desktop_ca(loaded, &ca, host) {
+                    Ok(message) => {
+                        if !installed {
+                            ui::open_security_settings(host);
+                        }
+                        loaded.desktop_certificate_check.invalidate();
+                        message
+                    }
+                    Err(error) => format!("Could not save desktop CA: {error}"),
+                });
+            }
+            if icons::button(ui, svg::ARROWS_CLOCKWISE, "Check again").clicked() {
+                loaded.desktop_certificate_check.invalidate();
+                loaded.desktop.refresh_ca();
+            }
+        });
+        ui.collapsing("Certificate details", |ui| {
+            ui.label("SHA-256 fingerprint");
+            ui.monospace(ca.fingerprint());
+            ui.label("This is the desktop's public inspection CA, separate from the Android CA. No private key is transferred. Apps that reject user CAs or pin certificates can still refuse inspection.");
+        });
+    } else if icons::button(ui, svg::ARROWS_CLOCKWISE, "Receive desktop CA").clicked() {
+        loaded.desktop.retry();
+    }
+    notice
+}
+
+fn save_desktop_ca(
+    loaded: &Loaded,
+    ca: &crate::proxy::desktop_ca::DesktopCa,
+    host: &Host,
+) -> Result<String, String> {
+    let path = loaded.paths.export_desktop_ca(ca)?;
+    let filename = ca.export_filename()?;
+    #[cfg(target_os = "android")]
+    {
+        use egui_mobile::HostExt;
+        host.save_to_gallery(
+            path.to_string_lossy().into_owned(),
+            &filename,
+            "application/x-x509-ca-cert",
+        )
+        .ok_or("Android could not write the certificate to Downloads")?;
+        log::info!("Desktop inspection CA exported to Downloads filename={filename}");
+        Ok(format!(
+            "Saved {filename} to Downloads. Choose CA certificate in Android Security settings."
+        ))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (host, filename);
+        Ok(format!("Saved {}", path.display()))
+    }
 }
 
 pub fn pairing(app: &mut PrivaxyApp, ui: &mut egui::Ui, _host: &Host) {
@@ -33,7 +135,7 @@ pub fn pairing(app: &mut PrivaxyApp, ui: &mut egui::Ui, _host: &Host) {
                 .hint_text("Desktop pairing code"),
         );
         #[cfg(target_os = "android")]
-        if ui.button("Paste pairing code").clicked() {
+        if icons::button(ui, svg::CLIPBOARD, "Paste pairing code").clicked() {
             use egui_mobile::HostExt;
             match _host.clipboard_text() {
                 Some(text) => {
@@ -46,11 +148,19 @@ pub fn pairing(app: &mut PrivaxyApp, ui: &mut egui::Ui, _host: &Host) {
         if let Ok(pair) = crate::proxy::pairing::DesktopPairing::parse(&app.pairing_draft) {
             ui.label(format!("Pair with {}:{}", pair.host, pair.port));
         }
-        if ui.button("Pair desktop").clicked() {
+        if icons::button(ui, svg::DESKTOP, "Pair desktop").clicked() {
             match crate::proxy::pairing::DesktopPairing::parse(&app.pairing_draft) {
                 Ok(pair) => {
                     app.desktop_host = pair.host.clone();
                     app.desktop_port = pair.port.to_string();
+                    if loaded
+                        .config
+                        .desktop_ca
+                        .as_ref()
+                        .is_some_and(|ca| !ca.belongs_to(&pair))
+                    {
+                        loaded.config.desktop_ca = None;
+                    }
                     loaded.config.desktop_pairing = Some(pair);
                     if loaded.config.desktop_enabled {
                         loaded.restart_proxy();
@@ -75,13 +185,20 @@ pub fn pairing(app: &mut PrivaxyApp, ui: &mut egui::Ui, _host: &Host) {
         if ui
             .add_enabled(
                 loaded.config.desktop_pairing.is_some(),
-                egui::Button::new("Check connection"),
+                icons::button_widget(ui, svg::PLUGS_CONNECTED, "Check connection"),
             )
             .clicked()
         {
             loaded.desktop.retry();
         }
-        if ui.button("View diagnostic logs").clicked() {
+        if loaded.config.desktop_pairing.is_some() {
+            ui.separator();
+            if let Some(message) = desktop_ca_help(loaded, ui, _host) {
+                app.notice = Some(message);
+            }
+            ui.separator();
+        }
+        if icons::button(ui, svg::SCROLL, "View diagnostic logs").clicked() {
             app.logs.open = true;
             app.tab = super::Tab::Settings;
         }
@@ -99,7 +216,7 @@ pub fn pairing(app: &mut PrivaxyApp, ui: &mut egui::Ui, _host: &Host) {
         if ui
             .add_enabled(
                 loaded.config.desktop_pairing.is_some(),
-                egui::Button::new("Save address"),
+                icons::button_widget(ui, svg::FLOPPY_DISK, "Save address"),
             )
             .clicked()
         {
@@ -136,10 +253,7 @@ pub fn pairing(app: &mut PrivaxyApp, ui: &mut egui::Ui, _host: &Host) {
                 loaded.restart_proxy();
             }
             ui.label("On LAN, enable Capture all traffic on Dashboard. With Tailscale, use proxy-only mode and configure supported apps to use 127.0.0.1:8100; keep Privaxy included in Tailscale routing. Desktop performs inspection using its CA. DNS and UDP remain direct. TCP fails if the desktop is unavailable.");
-            if loaded.config.desktop_enabled {
-                desktop_ca_help(ui);
-            }
-            if ui.button("Forget desktop").clicked() {
+            if icons::button(ui, svg::TRASH, "Forget desktop").clicked() {
                 app.forget_desktop = loaded.config.desktop_pairing.clone();
             }
         }
@@ -196,8 +310,10 @@ pub fn forget_desktop_confirmation(app: &mut PrivaxyApp, ctx: &egui::Context) {
     let was_enabled = loaded.config.desktop_enabled;
     loaded.config.desktop_enabled = false;
     loaded.config.desktop_pairing = None;
+    let saved_ca = loaded.config.desktop_ca.take();
     if let Err(error) = loaded.save() {
         loaded.config.desktop_pairing = pairing;
+        loaded.config.desktop_ca = saved_ca;
         loaded.config.desktop_enabled = was_enabled;
         app.notice = Some(format!("Could not forget desktop: {error}"));
         return;
@@ -281,7 +397,14 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
         }
 
         ui.add_space(10.0);
-        if ui::big_button(ui, "Apply and restart proxy", ui::ACCENT_FILL).clicked() {
+        if ui::big_icon_button(
+            ui,
+            svg::ARROWS_CLOCKWISE,
+            "Apply and restart proxy",
+            ui::ACCENT_FILL,
+        )
+        .clicked()
+        {
             match app.port_text.trim().parse::<u16>() {
                 Ok(port) if port >= 1024 => {
                     loaded.config.listen_port = port;
@@ -372,7 +495,14 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
         );
 
         ui.add_space(10.0);
-        if ui::big_button(ui, "Apply and restart capture", ui::ACCENT_FILL).clicked() {
+        if ui::big_icon_button(
+            ui,
+            svg::ARROWS_CLOCKWISE,
+            "Apply and restart capture",
+            ui::ACCENT_FILL,
+        )
+        .clicked()
+        {
             loaded.config.vpn_dns = app.vpn_dns_text.trim().to_owned();
             let _ = loaded.save();
             if loaded.vpn.status().is_on() {
@@ -390,12 +520,16 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
 
     ui.add_space(10.0);
 
+    if loaded.config.desktop_pairing.is_some() {
+        ui::card(ui, |ui| {
+            if let Some(message) = desktop_ca_help(loaded, ui, host) {
+                app.notice = Some(message);
+            }
+        });
+        ui.add_space(10.0);
+    }
     ui::card(ui, |ui| {
         ui::section_title(ui, "Android inspection CA");
-        if loaded.config.desktop_enabled && loaded.config.desktop_pairing.is_some() {
-            desktop_ca_help(ui);
-            ui.separator();
-        }
         ui.add_space(6.0);
         let certificate = &loaded.certificate_check.status;
         ui.label(egui::RichText::new(certificate.label()).size(12.0).color(
@@ -408,7 +542,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
             },
         ));
         ui.label(egui::RichText::new("This checks the Android app's own CA only, used for local inspection. It does not check the desktop CA. Each client app chooses which CAs it trusts; actual rejections appear in Requests > Failed.").size(12.0).color(ui.visuals().weak_text_color()));
-        if ui.button("Check certificate again").clicked() {
+        if icons::button(ui, svg::ARROWS_CLOCKWISE, "Check certificate again").clicked() {
             loaded.certificate_check.invalidate();
             loaded.certificate_check.update(&loaded.config.ca);
         }
@@ -440,7 +574,14 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
         // Two steps, because Android 11 and later refuse a programmatic CA install outright: the
         // installer answers "Can't install CA certificates" however the intent is built. Writing
         // the file and opening Settings is the only route left.
-        if ui::big_button(ui, "1. Save certificate to Downloads", ui::ACCENT_FILL).clicked() {
+        if ui::big_icon_button(
+            ui,
+            svg::DOWNLOAD_SIMPLE,
+            "1. Save certificate to Downloads",
+            ui::ACCENT_FILL,
+        )
+        .clicked()
+        {
             match loaded.paths.export_ca(&loaded.config) {
                 Ok(path) => {
                     host.share_file(path.to_string_lossy().to_string());

@@ -1,4 +1,5 @@
 //! Versioned, certificate-pinned desktop relay. Credentials stay in private app storage.
+use super::desktop_ca::{self, CaTransfer, STATUS_CA_PROTOCOL, STATUS_PROTOCOL};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -12,6 +13,14 @@ pub struct DesktopPairing {
     pub certificate_pem: String,
 }
 impl DesktopPairing {
+    // Address changes preserve the saved CA; a different pinned identity or token does not.
+    pub fn identity_key(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        digest.update(self.token.as_bytes());
+        digest.update(self.certificate_pem.as_bytes());
+        format!("{:x}", digest.finalize())
+    }
     pub fn parse(text: &str) -> Result<Self, String> {
         use base64::Engine as _;
         let input = text.trim();
@@ -127,7 +136,7 @@ impl DesktopPairing {
             let name = rustls_pki_types::ServerName::try_from("privaxy-desktop").unwrap();
             let mut config = self.tls_config()?;
             if status {
-                config.alpn_protocols = vec![b"privaxy-status-v1".to_vec()];
+                config.alpn_protocols = vec![STATUS_CA_PROTOCOL.to_vec(), STATUS_PROTOCOL.to_vec()];
             }
             let mut remote = tokio_rustls::TlsConnector::from(Arc::new(config))
                 .connect(name, tcp)
@@ -138,7 +147,9 @@ impl DesktopPairing {
                 started.elapsed().as_millis()
             );
             stage.store(2, std::sync::atomic::Ordering::Relaxed);
-            if status && remote.get_ref().1.alpn_protocol() != Some(b"privaxy-status-v1") {
+            if status
+                && !matches!(remote.get_ref().1.alpn_protocol(), Some(protocol) if protocol == STATUS_PROTOCOL || protocol == STATUS_CA_PROTOCOL)
+            {
                 return Err("Update Privaxy desktop to enable connection status".into());
             }
             remote
@@ -220,10 +231,19 @@ pub struct ConnectionMonitor {
     pair: Option<DesktopPairing>,
     runtime: Option<tokio::runtime::Runtime>,
     status: Arc<std::sync::Mutex<ConnectionStatus>>,
+    ca: Arc<std::sync::Mutex<CaTransfer>>,
+    refresh_ca: Arc<std::sync::atomic::AtomicBool>,
 }
 impl ConnectionMonitor {
     pub fn status(&self) -> ConnectionStatus {
         self.status.lock().unwrap().clone()
+    }
+    pub fn ca_transfer(&self) -> CaTransfer {
+        self.ca.lock().unwrap().clone()
+    }
+    pub fn refresh_ca(&self) {
+        self.refresh_ca
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
     pub fn retry(&mut self) {
         log::info!("Desktop connection retry requested");
@@ -244,6 +264,8 @@ impl ConnectionMonitor {
         self.pair = pair.cloned();
         // Use a fresh status cell so a cancelled old connection cannot overwrite the new one.
         self.status = Arc::default();
+        self.ca = Arc::default();
+        self.refresh_ca = Arc::default();
         let Some(pair) = self.pair.clone() else {
             return;
         };
@@ -261,10 +283,18 @@ impl ConnectionMonitor {
             }
         };
         let status = self.status.clone();
+        let ca = self.ca.clone();
+        let refresh_ca = self.refresh_ca.clone();
         runtime.spawn(async move {
             loop {
                 let result = async {
                     let mut stream = pair.connect(true).await?;
+                    let supports_ca =
+                        stream.get_ref().1.alpn_protocol() == Some(STATUS_CA_PROTOCOL);
+                    if !supports_ca {
+                        *ca.lock().unwrap() = CaTransfer::Unsupported;
+                    }
+                    let mut ca_checked: Option<std::time::Instant> = None;
                     let connected_at = std::time::Instant::now();
                     log::info!(
                         "Desktop connected and pairing verified endpoint={}:{}",
@@ -293,6 +323,32 @@ impl ConnectionMonitor {
                             connected_at.elapsed().as_secs()
                         );
                         *status.lock().unwrap() = ConnectionStatus::Connected;
+                        if supports_ca
+                            && (refresh_ca.swap(false, std::sync::atomic::Ordering::Relaxed)
+                                || ca_checked.is_none_or(|at| {
+                                    at.elapsed() >= std::time::Duration::from_secs(60)
+                                }))
+                        {
+                            match desktop_ca::receive(&mut stream, &pair).await {
+                                Ok(received) => {
+                                    let mut current = ca.lock().unwrap();
+                                    if *current != CaTransfer::Received(received.clone()) {
+                                        log::info!(
+                                            "Desktop inspection CA received sha256={}",
+                                            received.fingerprint()
+                                        );
+                                        *current = CaTransfer::Received(received);
+                                    }
+                                    ca_checked = Some(std::time::Instant::now());
+                                }
+                                Err(error) => {
+                                    log::warn!("Desktop inspection CA transfer failed: {error}");
+                                    *ca.lock().unwrap() = CaTransfer::Failed(error.clone());
+                                    // Reconnect rather than reusing a partially read protocol frame.
+                                    return Err(format!("Desktop CA transfer: {error}"));
+                                }
+                            }
+                        }
                         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     }
                     #[allow(unreachable_code)]
@@ -329,6 +385,80 @@ impl std::fmt::Debug for DesktopPairing {
 mod tests {
     use super::*;
     use base64::Engine as _;
+    #[tokio::test]
+    async fn status_negotiates_ca_transfer_and_falls_back_to_legacy_heartbeat() {
+        crate::proxy::install_crypto_provider();
+        for protocol in [STATUS_PROTOCOL, STATUS_CA_PROTOCOL] {
+            let rcgen::CertifiedKey { cert, signing_key } =
+                rcgen::generate_simple_self_signed(vec!["privaxy-desktop".into()]).unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let pair = DesktopPairing {
+                version: 1,
+                host: "127.0.0.1".into(),
+                port: listener.local_addr().unwrap().port(),
+                token: "a".repeat(64),
+                certificate_pem: cert.pem(),
+            };
+            let mut config = rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![cert.der().clone()],
+                    rustls_pki_types::PrivatePkcs8KeyDer::from(signing_key.serialize_der()).into(),
+                )
+                .unwrap();
+            config.alpn_protocols = vec![protocol.to_vec()];
+            let pem = crate::proxy::ca::CertAuthority::generate()
+                .unwrap()
+                .certificate_pem;
+            let expected = pem.clone();
+            let server = tokio::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut tls = tokio_rustls::TlsAcceptor::from(Arc::new(config))
+                    .accept(tcp)
+                    .await
+                    .unwrap();
+                let mut token = [0; 64];
+                tls.read_exact(&mut token).await.unwrap();
+                assert_eq!(token, [b'a'; 64]);
+                tls.write_all(b"OK").await.unwrap();
+                assert_eq!(tls.read_u8().await.unwrap(), b'P');
+                tls.write_all(b"P").await.unwrap();
+                if protocol == STATUS_CA_PROTOCOL {
+                    assert_eq!(tls.read_u8().await.unwrap(), b'C');
+                    tls.write_u32(pem.len() as u32).await.unwrap();
+                    tls.write_all(pem.as_bytes()).await.unwrap();
+                }
+                // v1 must receive another heartbeat, never an unsupported CA command.
+                assert_eq!(tls.read_u8().await.unwrap(), b'P');
+                tls.write_all(b"P").await.unwrap();
+                tls.shutdown().await.unwrap();
+            });
+            let mut monitor = ConnectionMonitor::default();
+            monitor.sync(Some(&pair));
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    match monitor.ca_transfer() {
+                        CaTransfer::Received(ca) if protocol == STATUS_CA_PROTOCOL => {
+                            assert_eq!(ca.pem(), expected);
+                            assert!(ca.belongs_to(&pair));
+                            break;
+                        }
+                        CaTransfer::Unsupported if protocol == STATUS_PROTOCOL => break,
+                        _ => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), server)
+                .await
+                .unwrap()
+                .unwrap();
+            monitor.sync(None);
+            assert_eq!(monitor.ca_transfer(), CaTransfer::Waiting);
+        }
+    }
+
     #[tokio::test]
     async fn pairing_code_and_pinned_relay_round_trip() {
         crate::proxy::install_crypto_provider();

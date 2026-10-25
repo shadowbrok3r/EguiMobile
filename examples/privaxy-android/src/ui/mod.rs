@@ -30,6 +30,16 @@ impl Tab {
         Tab::Pairing,
     ];
 
+    pub fn icon(self) -> egui_icon_pack::Icon {
+        use egui_icon_pack::phosphor_regular as svg;
+        match self {
+            Self::Dashboard => svg::GAUGE,
+            Self::Requests => svg::ARROWS_DOWN_UP,
+            Self::Filters => svg::FUNNEL,
+            Self::Settings => svg::SLIDERS,
+            Self::Pairing => svg::DESKTOP,
+        }
+    }
     pub fn label(self) -> &'static str {
         match self {
             Tab::Dashboard => "Dashboard",
@@ -181,6 +191,7 @@ pub fn open_security_settings(host: &egui_mobile::Host) {
 
 /// Install the shared default before persisted appearance settings are loaded.
 pub fn apply_theme(ctx: &egui::Context) {
+    egui_icon_pack::install(ctx);
     egui_mobile::theme::apply(ctx, egui_mobile::theme::Density::Touch);
 }
 
@@ -243,17 +254,37 @@ pub fn section_title(ui: &mut Ui, text: &str) {
 /// call after the fact would land on top of it. `Frame`'s own shadow is no use here: its margin
 /// maths excludes the shadow, so the halo would be clipped by the enclosing scroll area.
 pub fn big_button(ui: &mut Ui, text: &str, fill: Color32) -> Response {
+    big_button_inner(ui, text, fill, None)
+}
+pub fn big_icon_button(
+    ui: &mut Ui,
+    icon: egui_icon_pack::Icon,
+    text: &str,
+    fill: Color32,
+) -> Response {
+    big_button_inner(ui, text, fill, Some(icon))
+}
+fn big_button_inner(
+    ui: &mut Ui,
+    text: &str,
+    fill: Color32,
+    icon: Option<egui_icon_pack::Icon>,
+) -> Response {
     let fill = if fill == ACCENT_FILL {
         ui.visuals().selection.bg_fill
     } else {
         fill
     };
     let slot = ui.painter().add(egui::Shape::Noop);
+    let text = RichText::new(text).size(16.0).strong().color(ON_ACCENT);
+    let button = if let Some(icon) = icon {
+        egui_icon_pack::widgets::button_widget(ui, icon, text)
+    } else {
+        egui::Button::new(text)
+    };
     let response = ui.add_sized(
         [ui.available_width(), ui.spacing().interact_size.y],
-        egui::Button::new(RichText::new(text).size(16.0).strong().color(ON_ACCENT))
-            .fill(fill)
-            .corner_radius(CornerRadius::same(RADIUS)),
+        button.fill(fill).corner_radius(CornerRadius::same(RADIUS)),
     );
 
     let glow = if fill == ACCENT_FILL {

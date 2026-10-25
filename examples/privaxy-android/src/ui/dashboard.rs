@@ -5,6 +5,7 @@ use crate::proxy::config::MitmMode;
 use crate::proxy::state::{FiltersStatus, Status};
 use crate::ui;
 use crate::vpn::VpnStatus;
+use egui_icon_pack::{phosphor_regular as svg, widgets as icons};
 use egui_mobile::{Haptic, Host, egui};
 
 pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
@@ -32,7 +33,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                             .color(ui::ACCENT),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("Copy").clicked() {
+                        if icons::small_button(ui, svg::COPY, "Copy").clicked() {
                             host.copy_text(address.clone());
                             host.haptic(Haptic::Light);
                         }
@@ -67,11 +68,11 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
         ui.add_space(10.0);
 
         if status.is_running() || matches!(status, Status::Starting) {
-            if ui::big_button(ui, "Stop", ui::DANGER_FILL).clicked() {
+            if ui::big_icon_button(ui, svg::STOP, "Stop", ui::DANGER_FILL).clicked() {
                 loaded.stop_proxy();
                 host.haptic(Haptic::Medium);
             }
-        } else if ui::big_button(ui, "Start", ui::ACCENT_FILL).clicked() {
+        } else if ui::big_icon_button(ui, svg::PLAY, "Start", ui::ACCENT_FILL).clicked() {
             loaded.start_proxy();
             host.haptic(Haptic::Medium);
         }
@@ -88,7 +89,9 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
         ui.add_space(6.0);
 
         if loaded.config.desktop_enabled && loaded.config.desktop_pairing.is_some() {
-            super::settings::desktop_ca_help(ui);
+            if let Some(message) = super::settings::desktop_ca_help(loaded, ui, host) {
+                app.notice = Some(message);
+            }
             return;
         }
 
@@ -156,14 +159,23 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
         }
 
         ui.add_space(8.0);
-        let mut blocking = loaded.config.blocking_enabled;
-        if ui.checkbox(&mut blocking, "Blocking enabled").changed() {
+        let mut observe_only = !loaded.config.blocking_enabled;
+        if icons::checkbox(
+            ui,
+            &mut observe_only,
+            svg::EYE,
+            "Observe only · no blocking",
+        )
+        .changed()
+        {
+            let blocking = !observe_only;
             loaded.config.blocking_enabled = blocking;
             if let Some(proxy) = loaded.proxy.as_ref() {
                 proxy.set_blocking_enabled(blocking);
             }
             let _ = loaded.save();
         }
+        ui.weak("Observe only keeps capture and inspection active without ad blocking or HTML injection. Full inspection still needs a trusted CA.");
     });
 
     ui.add_space(10.0);
@@ -214,7 +226,8 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
             }
         });
         ui.add_space(6.0);
-        if ui::big_button(ui, "Open HTTPS browser test", ui::ACCENT_FILL).clicked() {
+        if ui::big_icon_button(ui, svg::GLOBE, "Open HTTPS browser test", ui::ACCENT_FILL).clicked()
+        {
             host.open_url(format!(
                 "https://example.com/?privaxy_check={}",
                 chrono::Utc::now().timestamp_millis()
@@ -368,13 +381,15 @@ fn capture_card(loaded: &mut crate::app::Loaded, ui: &mut egui::Ui, host: &Host)
         ui.add_space(10.0);
 
         if status.is_on() {
-            if ui::big_button(ui, "Stop capturing", ui::DANGER_FILL).clicked() {
+            if ui::big_icon_button(ui, svg::STOP, "Stop capturing", ui::DANGER_FILL).clicked() {
                 loaded.stop_capture();
                 loaded.config.capture_all = false;
                 let _ = loaded.save();
                 host.haptic(Haptic::Medium);
             }
-        } else if ui::big_button(ui, "Capture all traffic", ui::ACCENT_FILL).clicked() {
+        } else if ui::big_icon_button(ui, svg::NETWORK, "Capture all traffic", ui::ACCENT_FILL)
+            .clicked()
+        {
             // Notifications are asked for once capture is up, not here: a runtime permission
             // dialog raised in the same frame lands on top of the VPN consent dialog and finishes
             // it, which comes back as a refusal.

@@ -2,7 +2,7 @@
 name = "privaxy_android"
 # Android versionCode is derived from this: (1<<24)|(major<<16)|(minor<<8)|patch.
 # Bump before every release build — the phone only offers an update whose code is strictly greater.
-version = "0.5.12"
+version = "0.5.13"
 edition = "2024"
 publish = false
 
@@ -14,6 +14,7 @@ crate-type = ["cdylib", "rlib"]
 egui-mobile = { path = "../../crates/egui-mobile" }
 # Bundles NotoEmoji and emoji-icon-font into the default font chains.
 egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
+egui-icon-pack = { git = "https://github.com/shadowbrok3r/egui-theme-kit", rev = "09d1e793076357ec5d86df7e1d6771d0306f2e70", default-features = false, features = ["phosphor-regular"] }
 # Collapsible, syntax-coloured JSON for request and response bodies. Vendored fork of 0.16 —
 # see patches/egui-json-tree; upstream senses drag on every token, which steals the scroll.
 egui_json_tree = { path = "../../patches/egui-json-tree", features = ["serde_json"] }
@@ -37,6 +38,7 @@ rustls-pki-types = "1"
 # CA + per-host leaf certificates. Replaces privaxy's openssl(vendored), which needs a full
 # OpenSSL build against the NDK sysroot. ring backend, ECDSA P-256 keys.
 rcgen = { version = "0.14", default-features = false, features = ["pem", "ring", "x509-parser"] }
+x509-parser = "0.18"
 
 # Filter engine — same crate the desktop build uses; its whole tree is pure Rust.
 adblock = { version = "0.12", default-features = false, features = ["embedded-domain-resolver", "full-regex-handling"] }

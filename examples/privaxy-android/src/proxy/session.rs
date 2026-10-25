@@ -429,10 +429,13 @@ async fn forward(
     strip_hop_by_hop(&mut response_headers);
     // The proxy cannot inspect advertised QUIC alternatives. Do not encourage a captured
     // client to leave this working TCP connection for UDP (or retry the VPN's QUIC drop).
-    response_headers.remove(header::ALT_SVC);
+    if session.engine.is_enabled() {
+        response_headers.remove(header::ALT_SVC);
+    }
     // Preserve unsupported encodings (e.g. zstd) instead of mislabelling compressed bytes as
     // plaintext. Never rewrite encoded bodies, HEADs or byte ranges.
-    let is_html = !is_head
+    let is_html = session.engine.is_enabled()
+        && !is_head
         && status != StatusCode::PARTIAL_CONTENT
         && !response_headers.contains_key(header::CONTENT_ENCODING)
         && response_headers
@@ -631,6 +634,9 @@ async fn connect_origin(
 /// Collects the ids and classes on the page, asks the engine which of them are ad containers, and
 /// appends a stylesheet hiding them.
 fn rewrite_html(url: &str, body: &Bytes, session: &Session) -> Bytes {
+    if !session.engine.is_enabled() {
+        return body.clone();
+    }
     use lol_html::{HtmlRewriter, Settings, element};
 
     let mut ids: HashSet<String> = HashSet::new();

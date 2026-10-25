@@ -27,6 +27,7 @@ pub struct Loaded {
     pub vpn: VpnController,
     pub desktop: crate::proxy::pairing::ConnectionMonitor,
     pub certificate_check: crate::certificate::CertificateCheck,
+    pub desktop_certificate_check: crate::certificate::CertificateCheck,
 }
 
 impl Loaded {
@@ -405,6 +406,7 @@ impl PrivaxyApp {
                     proxy: None,
                     vpn: VpnController::new(),
                     certificate_check: crate::certificate::CertificateCheck::default(),
+                    desktop_certificate_check: Default::default(),
                 };
                 if start_now {
                     loaded.start_proxy();
@@ -521,7 +523,8 @@ impl PrivaxyApp {
                         if ui
                             .add_sized(
                                 [0.0, ui::TOUCH_HEIGHT],
-                                egui::Button::selectable(selected, text),
+                                egui::Button::selectable(selected, (tab.icon().image(16.0), text))
+                                    .image_tint_follows_text_color(true),
                             )
                             .clicked()
                             && !selected
@@ -554,6 +557,7 @@ impl EguiApp for PrivaxyApp {
                 app.request_filters = loaded.config.request_filters.clone();
                 app.inspect_wrap = loaded.config.inspect_wrap;
                 loaded.certificate_check.invalidate();
+                loaded.desktop_certificate_check.invalidate();
             }
         });
     }
@@ -573,6 +577,7 @@ impl EguiApp for PrivaxyApp {
         self.with_backend(|app| {
             if let Some(loaded) = app.loaded.as_mut() {
                 loaded.certificate_check.invalidate();
+                loaded.desktop_certificate_check.invalidate();
             }
         });
     }
@@ -628,6 +633,28 @@ impl PrivaxyApp {
         // The consent dialog's answer and the VPN service's callbacks both arrive on Java threads.
         if let Some(loaded) = self.loaded.as_mut() {
             loaded.desktop.sync(loaded.config.desktop_pairing.as_ref());
+            if let crate::proxy::desktop_ca::CaTransfer::Received(ca) = loaded.desktop.ca_transfer()
+            {
+                if loaded
+                    .config
+                    .desktop_pairing
+                    .as_ref()
+                    .is_some_and(|pair| ca.belongs_to(pair))
+                    && loaded.config.desktop_ca.as_ref() != Some(&ca)
+                {
+                    let replaced = loaded.config.paired_ca().is_some();
+                    loaded.config.desktop_ca = Some(ca);
+                    loaded.desktop_certificate_check.invalidate();
+                    self.notice = Some(match loaded.save() {
+                        Ok(()) if replaced => "Desktop inspection CA changed. Install the new certificate from Pairing.".into(),
+                        Ok(()) => "Desktop inspection CA received. Check installation in Pairing.".into(),
+                        Err(error) => format!("Desktop CA received but could not be saved: {error}"),
+                    });
+                }
+            }
+            if let Some(ca) = loaded.config.paired_ca() {
+                loaded.desktop_certificate_check.update_pem(ca.pem());
+            }
             if let Some(proxy) = loaded.proxy.as_mut() {
                 proxy.poll_startup();
             }
@@ -806,6 +833,7 @@ mod startup_tests {
             vpn: VpnController::new(),
             desktop: Default::default(),
             certificate_check: Default::default(),
+            desktop_certificate_check: Default::default(),
         };
         loaded.start_proxy();
         let wait = |loaded: &Loaded, predicate: fn(Status) -> bool| {

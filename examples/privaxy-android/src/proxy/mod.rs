@@ -6,6 +6,7 @@ mod body;
 pub mod ca;
 pub mod cert;
 pub mod config;
+pub mod desktop_ca;
 pub mod exclusions;
 pub mod har;
 pub mod pairing;

@@ -38,6 +38,15 @@ Privaxy included in Tailscale routing, and point proxy-aware apps at `127.0.0.1:
 Use a LAN desktop address or a network gateway routing to the tailnet for full capture.
 DNS and other UDP remain direct. Desktop HTTPS inspection uses the desktop's CA.
 
+The desktop sends its **public inspection CA** automatically after pairing, over the
+certificate-pinned, token-authenticated status connection. Android remembers it across
+restarts and address changes; it never replaces the Android app's own CA. **Pairing →
+Install desktop CA** saves a fingerprinted `.crt` to Downloads and opens Security settings.
+Choose **Install a certificate → CA certificate** and select that file. Android requires
+this approval, normally only once per desktop CA. The app checks that exact certificate
+against Android's enabled trust store and warns if the desktop CA changes. Older desktop
+versions still connect but need an update for automatic CA delivery.
+
 Proxy startup times out after 10 seconds and the Android VPN callback after 15 seconds.
 A failure stops capture and provides a retryable error instead of an indefinite
 Starting state. Waiting for the system permission dialog does not time out.
@@ -86,6 +95,13 @@ pinning.
 
 **Full inspection.** Terminates TLS with a certificate minted from the local CA, so individual URLs
 and page content can be filtered — this is where cosmetic filtering and HTML rewriting happen.
+
+**Observe only · no blocking** on Dashboard disables ad/tracker decisions and HTML injection
+while continuing to record requests and responses. With Full inspection enabled it still
+requires client trust in the CA. With desktop routing enabled, choose Observe only on the
+desktop; the desktop controls inspection and filtering. This is an inspection policy,
+not an automatic Linux firewall/transparent-routing setup. Encrypted passthrough still
+shows connection metadata only.
 
 Installing the certificate does **not** turn inspection on. Apps targeting Android 7+ do not trust
 user-installed CAs by default; individual apps can opt in or use their own trust store. Certificate
