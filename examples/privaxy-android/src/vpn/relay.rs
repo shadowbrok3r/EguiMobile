@@ -24,7 +24,9 @@ use crate::vpn::dns::{self, DnsMap};
 use crate::vpn::quic::{self, Sniffed};
 use crate::vpn::tun::TunDevice;
 use crate::vpn::{ProxyLink, VpnStats, sniff};
-use ipstack::{IpStack, IpStackConfig, IpStackStream, IpStackTcpStream, IpStackUdpStream};
+use ipstack::{
+    IpStack, IpStackConfig, IpStackStream, IpStackTcpStream, IpStackUdpStream, TcpConfig,
+};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::os::fd::OwnedFd;
@@ -39,6 +41,9 @@ use tokio::sync::oneshot;
 /// than queued: a dropped connection retries, an exhausted heap does not.
 const MAX_TCP_FLOWS: usize = 512;
 const MAX_UDP_FLOWS: usize = 256;
+/// TCP flows close after this long without traffic. ipstack's own minute cuts push and chat
+/// connections that only send a keep-alive every few minutes.
+const TCP_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 const PROXY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Long enough for the proxy to answer CONNECT, which it does without touching the network.
@@ -150,6 +155,9 @@ pub async fn run(
     let mut stack_config = IpStackConfig::default();
     stack_config.packet_information(false);
     stack_config.mtu_unchecked(context.config.mtu);
+    let mut tcp = TcpConfig::default();
+    tcp.timeout = TCP_IDLE_TIMEOUT;
+    stack_config.with_tcp_config(tcp);
     let mut stack = IpStack::new(stack_config, device);
 
     let tcp_flows = Arc::new(AtomicUsize::new(0));
