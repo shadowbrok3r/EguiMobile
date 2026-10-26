@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.6.2 — 2026-10-26
+
+- Tell the paired desktop which app opened each routed connection, so it can decrypt browsers and pass other apps such as Instagram straight through instead of failing their first connection.
+
 ## v0.6.1 — 2026-10-26
 
 - Move navigation from the scrolling top strip to an icon-only bottom bar that hides while typing, and make the Privaxy title a button back to the Dashboard.

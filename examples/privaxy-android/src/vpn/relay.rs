@@ -18,7 +18,7 @@
 //! Every flow is also attributed to the app that opened it, and the proxy learns that app through
 //! [`ProxyState::expect_origin`] before the relay's connection reaches it.
 
-use crate::proxy::state::{EventKind, NamedBy, Origin, ProxyState, RequestEvent};
+use crate::proxy::state::{App, EventKind, NamedBy, Origin, ProxyState, RequestEvent};
 use crate::vpn::apps::AppResolver;
 use crate::vpn::dns::{self, DnsMap};
 use crate::vpn::quic::{self, Sniffed};
@@ -260,7 +260,7 @@ async fn tcp_flow(mut tcp: IpStackTcpStream, context: Arc<Context>) -> std::io::
         return Ok(());
     };
 
-    match connect_through_proxy(&mut upstream, &host, target.port()).await {
+    match connect_through_proxy(&mut upstream, &host, target.port(), origin.app.as_deref()).await {
         Ok(leftover) => {
             if !leftover.is_empty() {
                 tcp.write_all(&leftover).await?;
@@ -358,10 +358,10 @@ async fn connect_through_proxy(
     upstream: &mut TcpStream,
     host: &str,
     port: u16,
+    app: Option<&App>,
 ) -> std::io::Result<Vec<u8>> {
-    let authority = authority(host, port);
-    let request = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n");
-    upstream.write_all(request.as_bytes()).await?;
+    let request = connect_request(&authority(host, port), app);
+    upstream.write_all(&request).await?;
 
     let mut reply = Vec::with_capacity(128);
     let mut chunk = [0_u8; 1024];
@@ -391,6 +391,27 @@ async fn connect_through_proxy(
     }
 
     Ok(reply.split_off(header_end))
+}
+
+/// CONNECT for `authority`, naming the app behind it so a paired desktop can decide whether to
+/// decrypt it; the phone's own proxy ignores the extra headers.
+fn connect_request(authority: &str, app: Option<&App>) -> Vec<u8> {
+    let mut request = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n").into_bytes();
+    let headers = app.into_iter().flat_map(|app| {
+        [
+            ("Privaxy-App", app.package.as_deref()),
+            ("Privaxy-App-Name", app.label.as_deref()),
+        ]
+    });
+    for (name, value) in headers {
+        let Some(value) = value else { continue };
+        let value: String = value.chars().filter(|c| !c.is_control()).collect();
+        if !value.trim().is_empty() {
+            request.extend_from_slice(format!("{name}: {}\r\n", value.trim()).as_bytes());
+        }
+    }
+    request.extend_from_slice(b"\r\n");
+    request
 }
 
 /// `host:port`, with an IPv6 literal bracketed the way a URI authority needs.
@@ -623,6 +644,31 @@ mod tests {
         assert_eq!(authority("example.com", 443), "example.com:443");
         assert_eq!(authority("93.184.216.34", 443), "93.184.216.34:443");
         assert_eq!(authority("2606:4700::1111", 443), "[2606:4700::1111]:443");
+    }
+
+    #[test]
+    fn connect_names_the_app_one_header_line_each() {
+        let app = App {
+            uid: 10123,
+            package: Some("com.instagram.android".into()),
+            label: Some("Insta\r\ngram ✨".into()),
+        };
+        assert_eq!(
+            String::from_utf8(connect_request("i.instagram.com:443", Some(&app))).unwrap(),
+            "CONNECT i.instagram.com:443 HTTP/1.1\r\nHost: i.instagram.com:443\r\n\
+             Privaxy-App: com.instagram.android\r\nPrivaxy-App-Name: Instagram ✨\r\n\r\n"
+        );
+        let unnamed = App {
+            uid: 1000,
+            package: None,
+            label: None,
+        };
+        for app in [None, Some(&unnamed)] {
+            assert_eq!(
+                connect_request("example.com:443", app),
+                b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
+            );
+        }
     }
 
     #[test]
