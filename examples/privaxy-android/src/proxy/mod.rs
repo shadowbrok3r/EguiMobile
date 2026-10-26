@@ -52,8 +52,14 @@ pub struct ProxyHandle {
 impl ProxyHandle {
     /// Spawns the runtime and starts listening. Failures land in [`ProxyState::status`] rather than
     /// propagating, so the UI can show them.
-    pub fn start(config: &Config, paths: Paths, state: Arc<ProxyState>) -> Self {
-        if config.desktop_enabled && config.desktop_pairing.is_none() {
+    /// `route` is the paired desktop routed traffic goes to, which may change while it runs.
+    pub fn start(
+        config: &Config,
+        paths: Paths,
+        state: Arc<ProxyState>,
+        route: pairing::DesktopRoute,
+    ) -> Self {
+        if config.desktop_enabled && config.desktops.is_empty() {
             state.set_status(Status::Failed(
                 "Desktop routing is enabled but no pairing is saved.".into(),
             ));
@@ -116,10 +122,7 @@ impl ProxyHandle {
         );
         let share_on_network = config.share_on_network;
 
-        let desktop = config
-            .desktop_enabled
-            .then(|| config.desktop_pairing.clone())
-            .flatten();
+        let desktop = config.desktop_enabled.then_some(route);
         let serving = serve(
             desktop,
             session.clone(),
@@ -362,7 +365,7 @@ impl Drop for ProxyHandle {
 }
 
 async fn serve(
-    desktop: Option<pairing::DesktopPairing>,
+    desktop: Option<pairing::DesktopRoute>,
     session: Arc<Session>,
     bind_address: SocketAddr,
     share_on_network: bool,
@@ -422,8 +425,13 @@ async fn serve(
         let session = session.clone();
         let connections = connections.clone();
         tokio::spawn(async move {
-            if let Some(desktop) = desktop {
-                if let Err(error) = desktop.relay(stream).await {
+            if let Some(route) = desktop {
+                let pair = route.read().unwrap().clone();
+                let relayed = match pair {
+                    Some(pair) => pair.relay(stream).await,
+                    None => Err("No desktop is paired".to_owned()),
+                };
+                if let Err(error) = relayed {
                     let exchange = relay_state.record(state::RequestEvent::now(
                         "RELAY",
                         "https://privaxy-desktop/",

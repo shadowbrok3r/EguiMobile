@@ -88,7 +88,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
         ui::section_title(ui, "Interception");
         ui.add_space(6.0);
 
-        if loaded.config.desktop_enabled && loaded.config.desktop_pairing.is_some() {
+        if loaded.config.desktop_enabled && !loaded.config.desktops.is_empty() {
             if let Some(message) = super::settings::desktop_ca_help(loaded, ui, host) {
                 app.notice = Some(message);
             }
@@ -366,9 +366,8 @@ fn capture_card(loaded: &mut crate::app::Loaded, ui: &mut egui::Ui, host: &Host)
         if loaded.config.desktop_enabled
             && loaded
                 .config
-                .desktop_pairing
-                .as_ref()
-                .is_some_and(|pair| pair.is_tailscale())
+                .active_desktop()
+                .is_some_and(|desktop| desktop.pairing.is_tailscale())
         {
             ui.label(egui::RichText::new("Tailscale needs Android's VPN slot too. Keep capture off for proxy-only routing through Tailscale, or select the desktop LAN address for full capture.").color(ui::WARN));
         }

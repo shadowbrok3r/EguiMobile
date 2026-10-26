@@ -230,12 +230,46 @@ fn default_filters() -> Vec<Filter> {
     ]
 }
 
+/// A paired desktop, the name shown for it, and the inspection CA it sent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedDesktop {
+    pub pairing: super::pairing::DesktopPairing,
+    pub name: String,
+    #[serde(default)]
+    pub ca: Option<super::desktop_ca::DesktopCa>,
+}
+
+impl SavedDesktop {
+    fn new(pairing: super::pairing::DesktopPairing) -> Self {
+        Self {
+            name: pairing.default_name(),
+            ca: None,
+            pairing,
+        }
+    }
+    pub fn id(&self) -> String {
+        self.pairing.identity_key()
+    }
+    /// Its inspection CA, while that still matches the pairing.
+    pub fn ca(&self) -> Option<&super::desktop_ca::DesktopCa> {
+        self.ca.as_ref().filter(|ca| ca.belongs_to(&self.pairing))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
+    /// Every paired desktop. Traffic goes to the first; the rest are tried in order while it is
+    /// unreachable.
     #[serde(default)]
-    pub desktop_pairing: Option<super::pairing::DesktopPairing>,
-    #[serde(default)]
-    pub desktop_ca: Option<super::desktop_ca::DesktopCa>,
+    pub desktops: Vec<SavedDesktop>,
+    /// Move to the next reachable paired desktop when the first cannot be reached.
+    #[serde(default = "yes")]
+    pub desktop_failover: bool,
+    // The single pairing and CA kept before several desktops were; moved into `desktops` on load.
+    #[serde(default, skip_serializing)]
+    desktop_pairing: Option<super::pairing::DesktopPairing>,
+    #[serde(default, skip_serializing)]
+    desktop_ca: Option<super::desktop_ca::DesktopCa>,
     #[serde(default)]
     pub desktop_enabled: bool,
     #[serde(default)]
@@ -302,6 +336,8 @@ fn default_vpn_dns() -> String {
 impl Config {
     fn new(ca: CertAuthority) -> Self {
         Self {
+            desktops: Vec::new(),
+            desktop_failover: true,
             desktop_pairing: None,
             desktop_ca: None,
             desktop_enabled: false,
@@ -332,9 +368,105 @@ impl Config {
     pub fn enabled_filters(&self) -> impl Iterator<Item = &Filter> {
         self.filters.iter().filter(|filter| filter.enabled)
     }
+    /// The active desktop's inspection CA.
     pub fn paired_ca(&self) -> Option<&super::desktop_ca::DesktopCa> {
-        let pair = self.desktop_pairing.as_ref()?;
-        self.desktop_ca.as_ref().filter(|ca| ca.belongs_to(pair))
+        self.active_desktop()?.ca()
+    }
+
+    /// The desktop traffic goes to.
+    pub fn active_desktop(&self) -> Option<&SavedDesktop> {
+        self.desktops.first()
+    }
+
+    /// Every paired desktop's pairing, the active one first.
+    pub fn desktop_pairings(&self) -> Vec<super::pairing::DesktopPairing> {
+        self.desktops
+            .iter()
+            .map(|desktop| desktop.pairing.clone())
+            .collect()
+    }
+
+    /// Moves a pairing saved before several desktops were kept into [`Self::desktops`].
+    fn migrate_desktops(&mut self) {
+        if let Some(pairing) = self.desktop_pairing.take() {
+            let ca = self.desktop_ca.take().filter(|ca| ca.belongs_to(&pairing));
+            if !self
+                .desktops
+                .iter()
+                .any(|desktop| desktop.id() == pairing.identity_key())
+            {
+                let mut desktop = SavedDesktop::new(pairing);
+                desktop.ca = ca;
+                self.desktops.insert(0, desktop);
+            }
+        }
+        self.desktop_ca = None;
+    }
+
+    /// Makes `pairing` the active desktop, updating the saved one with the same identity, or from
+    /// the same computer after it revoked its pairings. Returns whether it is new.
+    pub fn add_desktop(&mut self, pairing: super::pairing::DesktopPairing) -> bool {
+        let id = pairing.identity_key();
+        let existing = self
+            .desktops
+            .iter()
+            .position(|desktop| desktop.id() == id)
+            .or_else(|| {
+                let computer = pairing.desktop_id.as_ref()?;
+                self.desktops
+                    .iter()
+                    .position(|desktop| desktop.pairing.desktop_id.as_ref() == Some(computer))
+            });
+        let desktop = match existing {
+            Some(at) => {
+                let mut desktop = self.desktops.remove(at);
+                if desktop.name == desktop.pairing.default_name() {
+                    desktop.name = pairing.default_name();
+                }
+                desktop.pairing = pairing;
+                desktop
+            }
+            None => SavedDesktop::new(pairing),
+        };
+        self.desktops.insert(0, desktop);
+        existing.is_none()
+    }
+
+    /// Makes the desktop with identity `id` the active one; false when none has it.
+    pub fn use_desktop(&mut self, id: &str) -> bool {
+        let Some(at) = self.desktops.iter().position(|desktop| desktop.id() == id) else {
+            return false;
+        };
+        let desktop = self.desktops.remove(at);
+        self.desktops.insert(0, desktop);
+        true
+    }
+
+    /// Removes the desktop with identity `id`; desktop routing turns off with the last one.
+    pub fn forget_desktop(&mut self, id: &str) -> Option<SavedDesktop> {
+        let at = self
+            .desktops
+            .iter()
+            .position(|desktop| desktop.id() == id)?;
+        let removed = self.desktops.remove(at);
+        if self.desktops.is_empty() {
+            self.desktop_enabled = false;
+        }
+        Some(removed)
+    }
+
+    /// Keeps `ca` with the desktop that sent it; `Some(replaced)` when that changed what was saved.
+    pub fn store_desktop_ca(&mut self, ca: super::desktop_ca::DesktopCa) -> Option<bool> {
+        let desktop = self
+            .desktops
+            .iter_mut()
+            .find(|desktop| ca.belongs_to(&desktop.pairing))?;
+        if desktop.ca.as_ref() == Some(&ca) {
+            return None;
+        }
+        let replaced = desktop.ca().is_some();
+        desktop.ca = Some(ca);
+        Some(replaced)
     }
 
     /// Resolver addresses for the tun, ignoring blank entries in the stored list.
@@ -381,7 +513,10 @@ impl Paths {
 
         if let Ok(bytes) = std::fs::read(&self.config_file) {
             match serde_json::from_slice::<Config>(&bytes) {
-                Ok(config) => return Ok(config),
+                Ok(mut config) => {
+                    config.migrate_desktops();
+                    return Ok(config);
+                }
                 Err(error) => log::warn!("Discarding unreadable configuration: {error}"),
             }
         }

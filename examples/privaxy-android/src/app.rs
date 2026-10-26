@@ -43,7 +43,12 @@ impl Loaded {
         if let Some(mut previous) = self.proxy.take() {
             previous.stop();
         }
-        let proxy = ProxyHandle::start(&self.config, self.paths.clone(), self.state.clone());
+        let proxy = ProxyHandle::start(
+            &self.config,
+            self.paths.clone(),
+            self.state.clone(),
+            self.desktop.route(),
+        );
         self.vpn.link().set(proxy.session());
         self.proxy = Some(proxy);
         if self.config.foreground_service {
@@ -250,6 +255,7 @@ pub struct PrivaxyApp {
     pub forget_desktop: Option<crate::proxy::pairing::DesktopPairing>,
     pub desktop_host: String,
     pub desktop_port: String,
+    pub desktop_name: String,
     pub port_text: String,
     pub vpn_dns_text: String,
     pub exclusions_draft: String,
@@ -339,6 +345,7 @@ impl PrivaxyApp {
             forget_desktop: None,
             desktop_host: String::new(),
             desktop_port: "8101".into(),
+            desktop_name: String::new(),
             port_text: String::new(),
             vpn_dns_text: String::new(),
             exclusions_draft: String::new(),
@@ -378,10 +385,8 @@ impl PrivaxyApp {
         match paths.load_or_create() {
             Ok(config) => {
                 self.port_text = config.listen_port.to_string();
-                if let Some(pair) = &config.desktop_pairing {
-                    self.desktop_host = pair.host.clone();
-                    self.desktop_port = pair.port.to_string();
-                }
+                (self.desktop_host, self.desktop_port, self.desktop_name) =
+                    desktop_drafts(config.active_desktop());
                 self.vpn_dns_text = config.vpn_dns.clone();
                 self.request_filters = config.request_filters.clone();
                 self.inspect_wrap = config.inspect_wrap;
@@ -554,10 +559,8 @@ impl EguiApp for PrivaxyApp {
             app.ensure_loaded(host);
             if let Some(loaded) = app.loaded.as_mut() {
                 app.port_text = loaded.config.listen_port.to_string();
-                if let Some(pair) = &loaded.config.desktop_pairing {
-                    app.desktop_host = pair.host.clone();
-                    app.desktop_port = pair.port.to_string();
-                }
+                (app.desktop_host, app.desktop_port, app.desktop_name) =
+                    desktop_drafts(loaded.config.active_desktop());
                 app.vpn_dns_text = loaded.config.vpn_dns.clone();
                 app.request_filters = loaded.config.request_filters.clone();
                 app.inspect_wrap = loaded.config.inspect_wrap;
@@ -592,6 +595,20 @@ impl EguiApp for PrivaxyApp {
     }
 }
 
+/// The host, port and name editors' contents for `desktop`, the active one.
+pub fn desktop_drafts(
+    desktop: Option<&crate::proxy::config::SavedDesktop>,
+) -> (String, String, String) {
+    match desktop {
+        Some(desktop) => (
+            desktop.pairing.host.clone(),
+            desktop.pairing.port.to_string(),
+            desktop.name.clone(),
+        ),
+        None => (String::new(), "8101".into(), String::new()),
+    }
+}
+
 impl PrivaxyApp {
     fn update_screen(&mut self, ui: &mut egui::Ui, host: &Host) {
         self.poll_file_job(host);
@@ -622,13 +639,11 @@ impl PrivaxyApp {
             use egui_mobile::HostExt;
             if let Some(uri) = host.take_view_intent() {
                 match crate::proxy::pairing::DesktopPairing::parse(&uri) {
-                    Ok(pair) => {
+                    Ok(_) => {
                         self.forget_desktop = None;
-                        self.desktop_host = pair.host;
-                        self.desktop_port = pair.port.to_string();
                         self.pairing_draft = uri;
                         self.tab = Tab::Pairing;
-                        self.notice = Some("Review this desktop, then tap Pair desktop.".into());
+                        self.notice = Some("Review this desktop, then tap Add desktop.".into());
                         egui_mobile::note_ime_out_of_band_edit();
                     }
                     Err(reason) => self.notice = Some(reason),
@@ -637,18 +652,38 @@ impl PrivaxyApp {
         }
         // The consent dialog's answer and the VPN service's callbacks both arrive on Java threads.
         if let Some(loaded) = self.loaded.as_mut() {
-            loaded.desktop.sync(loaded.config.desktop_pairing.as_ref());
+            loaded.desktop.sync(
+                &loaded.config.desktop_pairings(),
+                loaded.config.desktop_failover,
+            );
+            if let Some(id) = loaded.desktop.take_switch() {
+                let previous = loaded
+                    .config
+                    .active_desktop()
+                    .map(|desktop| desktop.name.clone());
+                if loaded.config.use_desktop(&id) {
+                    let active = loaded.config.active_desktop().cloned();
+                    let name = active
+                        .as_ref()
+                        .map(|desktop| desktop.name.clone())
+                        .unwrap_or_default();
+                    (self.desktop_host, self.desktop_port, self.desktop_name) =
+                        desktop_drafts(active.as_ref());
+                    loaded.desktop_certificate_check.invalidate();
+                    self.notice = Some(match (loaded.save(), previous) {
+                        (Ok(()), Some(previous)) => {
+                            format!("Switched to {name}: {previous} is unreachable.")
+                        }
+                        (Ok(()), None) => format!("Switched to {name}."),
+                        (Err(error), _) => {
+                            format!("Switched to {name}, but could not save it: {error}")
+                        }
+                    });
+                }
+            }
             if let crate::proxy::desktop_ca::CaTransfer::Received(ca) = loaded.desktop.ca_transfer()
             {
-                if loaded
-                    .config
-                    .desktop_pairing
-                    .as_ref()
-                    .is_some_and(|pair| ca.belongs_to(pair))
-                    && loaded.config.desktop_ca.as_ref() != Some(&ca)
-                {
-                    let replaced = loaded.config.paired_ca().is_some();
-                    loaded.config.desktop_ca = Some(ca);
+                if let Some(replaced) = loaded.config.store_desktop_ca(ca) {
                     loaded.desktop_certificate_check.invalidate();
                     self.notice = Some(match loaded.save() {
                         Ok(()) if replaced => "Desktop inspection CA changed. Install the new certificate from Pairing.".into(),

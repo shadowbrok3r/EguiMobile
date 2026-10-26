@@ -127,7 +127,7 @@ pub fn pairing(app: &mut PrivaxyApp, ui: &mut egui::Ui, _host: &Host) {
     ui::card(ui, |ui| {
         ui::section_title(ui, "Desktop pairing");
         ui.label(
-            "Scan the desktop QR with your camera to open Privaxy, or paste its pairing code. Pair once to save the desktop certificate and credentials.",
+            "Scan a desktop's QR with your camera to open Privaxy, or paste its pairing code. Every desktop you add is kept, so moving between computers needs no new pairing.",
         );
         ui.add(
             egui::TextEdit::singleline(&mut app.pairing_draft)
@@ -146,30 +146,31 @@ pub fn pairing(app: &mut PrivaxyApp, ui: &mut egui::Ui, _host: &Host) {
             }
         }
         if let Ok(pair) = crate::proxy::pairing::DesktopPairing::parse(&app.pairing_draft) {
-            ui.label(format!("Pair with {}:{}", pair.host, pair.port));
+            ui.label(format!(
+                "Add {} at {}:{}",
+                pair.default_name(),
+                pair.host,
+                pair.port
+            ));
         }
-        if icons::button(ui, svg::DESKTOP, "Pair desktop").clicked() {
+        if icons::button(ui, svg::PLUS, "Add desktop").clicked() {
             match crate::proxy::pairing::DesktopPairing::parse(&app.pairing_draft) {
                 Ok(pair) => {
-                    app.desktop_host = pair.host.clone();
-                    app.desktop_port = pair.port.to_string();
-                    if loaded
-                        .config
-                        .desktop_ca
-                        .as_ref()
-                        .is_some_and(|ca| !ca.belongs_to(&pair))
-                    {
-                        loaded.config.desktop_ca = None;
-                    }
-                    loaded.config.desktop_pairing = Some(pair);
-                    if loaded.config.desktop_enabled {
-                        loaded.restart_proxy();
-                    }
+                    let added = loaded.config.add_desktop(pair);
+                    (app.desktop_host, app.desktop_port, app.desktop_name) =
+                        crate::app::desktop_drafts(loaded.config.active_desktop());
+                    loaded.desktop_certificate_check.invalidate();
                     match loaded.save() {
                         Ok(()) => {
                             app.pairing_draft.clear();
-                            app.notice =
-                                Some("Pairing saved. Checking the desktop connection…".into());
+                            app.notice = Some(if added {
+                                format!(
+                                    "Added {}; it is now the active desktop. Checking the connection…",
+                                    app.desktop_name
+                                )
+                            } else {
+                                format!("Updated {}. Checking the connection…", app.desktop_name)
+                            });
                         }
                         Err(e) => app.notice = Some(e),
                     }
@@ -182,27 +183,104 @@ pub fn pairing(app: &mut PrivaxyApp, ui: &mut egui::Ui, _host: &Host) {
         if let crate::proxy::pairing::ConnectionStatus::Offline(reason) = &status {
             ui.label(egui::RichText::new(reason).color(ui::WARN));
         }
-        if ui
-            .add_enabled(
-                loaded.config.desktop_pairing.is_some(),
-                icons::button_widget(ui, svg::PLUGS_CONNECTED, "Check connection"),
-            )
-            .clicked()
-        {
-            loaded.desktop.retry();
-        }
-        if loaded.config.desktop_pairing.is_some() {
-            ui.separator();
-            if let Some(message) = desktop_ca_help(loaded, ui, _host) {
-                app.notice = Some(message);
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    !loaded.config.desktops.is_empty(),
+                    icons::button_widget(ui, svg::PLUGS_CONNECTED, "Check connection"),
+                )
+                .clicked()
+            {
+                loaded.desktop.retry();
             }
-            ui.separator();
+            if icons::button(ui, svg::SCROLL, "View diagnostic logs").clicked() {
+                app.logs.open = true;
+                app.logs.reveal = true;
+                app.tab = super::Tab::Settings;
+            }
+        });
+    });
+    ui.add_space(10.0);
+
+    if loaded.config.desktops.is_empty() {
+        return;
+    }
+
+    ui::card(ui, |ui| {
+        ui::section_title(ui, "Paired desktops");
+        let current = loaded.desktop.current().map(|pair| pair.identity_key());
+        let connected =
+            loaded.desktop.status() == crate::proxy::pairing::ConnectionStatus::Connected;
+        let mut chosen = None;
+        for (index, desktop) in loaded.config.desktops.iter().enumerate() {
+            let id = desktop.id();
+            let (state, color) = if connected && current.as_deref() == Some(id.as_str()) {
+                ("Connected", ui::GOOD)
+            } else if index == 0 {
+                ("Active", ui::WARN)
+            } else {
+                ("Standby", ui::MUTED)
+            };
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icons::icon_button(ui, svg::TRASH, "Forget this desktop").clicked() {
+                        app.forget_desktop = Some(desktop.pairing.clone());
+                    }
+                    if index != 0 && icons::button(ui, svg::PLUGS_CONNECTED, "Use").clicked() {
+                        chosen = Some(id.clone());
+                    }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(&desktop.name).strong())
+                                .truncate(),
+                        );
+                    });
+                });
+            });
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(state).small().color(color));
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}:{}",
+                        desktop.pairing.host, desktop.pairing.port
+                    ))
+                    .small()
+                    .color(ui::MUTED),
+                );
+            });
+            ui.add_space(4.0);
         }
-        if icons::button(ui, svg::SCROLL, "View diagnostic logs").clicked() {
-            app.logs.open = true;
-            app.logs.reveal = true;
-            app.tab = super::Tab::Settings;
+        if let Some(id) = chosen
+            && loaded.config.use_desktop(&id)
+        {
+            (app.desktop_host, app.desktop_port, app.desktop_name) =
+                crate::app::desktop_drafts(loaded.config.active_desktop());
+            loaded.desktop_certificate_check.invalidate();
+            app.notice = Some(match loaded.save() {
+                Ok(()) => format!("Using {}. Checking the connection…", app.desktop_name),
+                Err(e) => e,
+            });
         }
+        let mut failover = loaded.config.desktop_failover;
+        if ui
+            .checkbox(
+                &mut failover,
+                "Switch to another paired desktop when the active one is unreachable",
+            )
+            .changed()
+        {
+            loaded.config.desktop_failover = failover;
+            if let Err(e) = loaded.save() {
+                app.notice = Some(e);
+            }
+        }
+    });
+    ui.add_space(10.0);
+
+    ui::card(ui, |ui| {
+        ui::section_title(ui, "Active desktop");
+        ui.label("Name");
+        ui.add(egui::TextEdit::singleline(&mut app.desktop_name).hint_text("Home PC"));
         ui.label("Desktop IP or hostname");
         ui.add(
             egui::TextEdit::singleline(&mut app.desktop_host)
@@ -214,49 +292,45 @@ pub fn pairing(app: &mut PrivaxyApp, ui: &mut egui::Ui, _host: &Host) {
                 .char_limit(5)
                 .desired_width(100.0),
         );
-        if ui
-            .add_enabled(
-                loaded.config.desktop_pairing.is_some(),
-                icons::button_widget(ui, svg::FLOPPY_DISK, "Save address"),
-            )
-            .clicked()
-        {
-            let pair = loaded.config.desktop_pairing.as_ref().unwrap();
-            match pair.with_address(&app.desktop_host, &app.desktop_port) {
+        if icons::button(ui, svg::FLOPPY_DISK, "Save name and address").clicked() {
+            let desktop = &loaded.config.desktops[0];
+            match desktop
+                .pairing
+                .with_address(&app.desktop_host, &app.desktop_port)
+            {
                 Ok(pair) => {
-                    loaded.config.desktop_pairing = Some(pair);
-                    if let Err(e) = loaded.save() {
-                        app.notice = Some(e);
-                    } else {
-                        app.notice = Some("Address saved. Checking the desktop connection…".into());
-                    }
-                    if loaded.config.desktop_enabled {
-                        loaded.restart_proxy();
-                    }
+                    let name = crate::proxy::pairing::clean_name(&app.desktop_name)
+                        .unwrap_or_else(|| pair.default_name());
+                    let active = &mut loaded.config.desktops[0];
+                    active.pairing = pair;
+                    active.name = name.clone();
+                    app.desktop_name = name;
+                    app.notice = Some(match loaded.save() {
+                        Ok(()) => "Saved. Checking the desktop connection…".into(),
+                        Err(e) => e,
+                    });
                 }
                 Err(e) => app.notice = Some(e),
             }
         }
-        if let Some(pair) = &loaded.config.desktop_pairing {
-            ui.label(format!("Saved desktop: {}:{}", pair.host, pair.port));
-            if pair.is_tailscale() {
-                ui.label(egui::RichText::new("Tailscale address: keep Capture all traffic OFF while Tailscale is your Android VPN. Splitting apps does not allow two VPNs. For full capture, use the LAN address or a network gateway that routes to Tailscale.").color(ui::WARN));
+        if loaded.config.desktops[0].pairing.is_tailscale() {
+            ui.label(egui::RichText::new("Tailscale address: keep Capture all traffic OFF while Tailscale is your Android VPN. Splitting apps does not allow two VPNs. For full capture, use the LAN address or a network gateway that routes to Tailscale.").color(ui::WARN));
+        }
+        let mut enabled = loaded.config.desktop_enabled;
+        if ui
+            .checkbox(&mut enabled, "Route captured TCP traffic through desktop")
+            .changed()
+        {
+            loaded.config.desktop_enabled = enabled;
+            if let Err(e) = loaded.save() {
+                app.notice = Some(e);
             }
-            let mut enabled = loaded.config.desktop_enabled;
-            if ui
-                .checkbox(&mut enabled, "Route captured TCP traffic through desktop")
-                .changed()
-            {
-                loaded.config.desktop_enabled = enabled;
-                if let Err(e) = loaded.save() {
-                    app.notice = Some(e);
-                }
-                loaded.restart_proxy();
-            }
-            ui.label("On LAN, enable Capture all traffic on Dashboard. With Tailscale, use proxy-only mode and configure supported apps to use 127.0.0.1:8100; keep Privaxy included in Tailscale routing. Desktop performs inspection using its CA. DNS and UDP remain direct. TCP fails if the desktop is unavailable.");
-            if icons::button(ui, svg::TRASH, "Forget desktop").clicked() {
-                app.forget_desktop = loaded.config.desktop_pairing.clone();
-            }
+            loaded.restart_proxy();
+        }
+        ui.label("On LAN, enable Capture all traffic on Dashboard. With Tailscale, use proxy-only mode and configure supported apps to use 127.0.0.1:8100; keep Privaxy included in Tailscale routing. Desktop performs inspection using its CA. DNS and UDP remain direct. TCP fails if no paired desktop is reachable.");
+        ui.separator();
+        if let Some(message) = desktop_ca_help(loaded, ui, _host) {
+            app.notice = Some(message);
         }
     });
     ui.add_space(10.0);
@@ -267,23 +341,25 @@ pub fn forget_desktop_confirmation(app: &mut PrivaxyApp, ctx: &egui::Context) {
         return;
     };
     // A new deep link or pairing must never be erased by an older confirmation.
-    if app
-        .loaded
-        .as_ref()
-        .and_then(|loaded| loaded.config.desktop_pairing.as_ref())
-        != Some(pair)
-        || ui::back_pressed(ctx)
-    {
+    let saved = app.loaded.as_ref().and_then(|loaded| {
+        loaded
+            .config
+            .desktops
+            .iter()
+            .find(|desktop| desktop.pairing == *pair)
+            .map(|desktop| desktop.name.clone())
+    });
+    let Some(name) = saved.filter(|_| !ui::back_pressed(ctx)) else {
         app.forget_desktop = None;
         return;
-    }
+    };
 
     let modal = egui::Modal::new(egui::Id::unique("forget_desktop_confirmation")).show(ctx, |ui| {
         ui.set_width((ctx.content_rect().width() - 48.0).clamp(0.0, 360.0));
-        ui.heading("Forget desktop pairing?");
+        ui.heading(format!("Forget {name}?"));
         ui.add_space(8.0);
         ui.label(format!("Desktop: {}:{}", pair.host, pair.port));
-        ui.label("This removes the saved pairing and turns off desktop routing. You'll need to scan or paste the desktop pairing code again to reconnect.");
+        ui.label("This removes its pairing and saved CA. Other paired desktops stay. You'll need to scan or paste this desktop's pairing code again to use it.");
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             let width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
@@ -291,7 +367,7 @@ pub fn forget_desktop_confirmation(app: &mut PrivaxyApp, ctx: &egui::Context) {
             let cancel = ui.add_sized([width, height], egui::Button::new("Cancel")).clicked();
             let forget = ui.add_sized(
                 [width, height],
-                egui::Button::new(egui::RichText::new("Forget pairing").color(ui::BAD)),
+                egui::Button::new(egui::RichText::new("Forget desktop").color(ui::BAD)),
             ).clicked();
             (cancel, forget)
         }).inner
@@ -304,29 +380,31 @@ pub fn forget_desktop_confirmation(app: &mut PrivaxyApp, ctx: &egui::Context) {
         return;
     }
 
-    let pairing = app.forget_desktop.take();
+    let Some(pairing) = app.forget_desktop.take() else {
+        return;
+    };
     let Some(loaded) = app.loaded.as_mut() else {
         return;
     };
+    let before = loaded.config.clone();
     let was_enabled = loaded.config.desktop_enabled;
-    loaded.config.desktop_enabled = false;
-    loaded.config.desktop_pairing = None;
-    let saved_ca = loaded.config.desktop_ca.take();
+    loaded.config.forget_desktop(&pairing.identity_key());
     if let Err(error) = loaded.save() {
-        loaded.config.desktop_pairing = pairing;
-        loaded.config.desktop_ca = saved_ca;
-        loaded.config.desktop_enabled = was_enabled;
-        app.notice = Some(format!("Could not forget desktop: {error}"));
+        loaded.config = before;
+        app.notice = Some(format!("Could not forget {name}: {error}"));
         return;
     }
-    loaded.desktop.sync(None);
-    if was_enabled && loaded.proxy.is_some() {
+    (app.desktop_host, app.desktop_port, app.desktop_name) =
+        crate::app::desktop_drafts(loaded.config.active_desktop());
+    loaded.desktop_certificate_check.invalidate();
+    if was_enabled && !loaded.config.desktop_enabled && loaded.proxy.is_some() {
         loaded.restart_proxy();
     }
     app.pairing_draft.clear();
-    app.desktop_host.clear();
-    app.desktop_port = "8101".into();
-    app.notice = Some("Desktop pairing forgotten. Desktop routing is off.".into());
+    app.notice = Some(match loaded.config.active_desktop() {
+        Some(active) => format!("Forgot {name}. Using {}.", active.name),
+        None => format!("Forgot {name}. No desktop is paired; desktop routing is off."),
+    });
 }
 
 /// Lays out `add` with a full screen of height, so nested scroll areas deep in the page keep their size.

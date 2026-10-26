@@ -5646,7 +5646,7 @@ dependencies = [
 
 [[package]]
 name = "privaxy_android"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "adblock",
  "android-activity",
