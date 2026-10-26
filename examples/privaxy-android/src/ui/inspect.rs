@@ -568,6 +568,22 @@ fn overview(event: &RequestEvent, ui: &mut egui::Ui) {
             "Domain",
             egui::RichText::new(event.domain()).monospace(),
         );
+        if let Some(origin) = &event.origin {
+            if let Some(app) = &origin.app {
+                ui::detail_row(ui, "App", egui::RichText::new(app.describe()).strong());
+                ui::detail_row(
+                    ui,
+                    "App uid",
+                    egui::RichText::new(app.uid.to_string()).monospace(),
+                );
+            }
+            ui::detail_row(
+                ui,
+                "Address",
+                egui::RichText::new(origin.destination.to_string()).monospace(),
+            );
+            ui::detail_row(ui, "Host from", egui::RichText::new(origin.named_by.label()));
+        }
         if let Some(status) = exchange.status {
             ui::detail_row(
                 ui,
@@ -593,17 +609,24 @@ fn overview(event: &RequestEvent, ui: &mut egui::Ui) {
         }
     });
 
-    if let EventKind::Blocked { filter } = &event.kind {
+    if let EventKind::Blocked { rule } = &event.kind {
         ui.add_space(8.0);
         ui::card(ui, |ui| {
             ui::section_title(ui, "Matched rule");
             ui.add_space(4.0);
             ui.label(
-                egui::RichText::new(filter)
+                egui::RichText::new(&rule.text)
                     .size(12.0)
                     .monospace()
                     .color(ui::WARN),
             );
+            if let Some(location) = rule.location() {
+                ui.label(
+                    egui::RichText::new(location)
+                        .size(11.0)
+                        .color(ui.visuals().weak_text_color()),
+                );
+            }
         });
     }
 

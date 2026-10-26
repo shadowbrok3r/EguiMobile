@@ -1,11 +1,11 @@
 //! Per-connection request handling: CONNECT interception, tunneling, and the filtered forward path.
 
-use crate::proxy::blocker::FilterEngine;
+use crate::proxy::blocker::{BlockRule, FilterEngine};
 use crate::proxy::body::CaptureBody;
 use crate::proxy::cert::CertCache;
 use crate::proxy::config::MitmMode;
 use crate::proxy::exclusions::ExclusionStore;
-use crate::proxy::state::{EventKind, Exchange, ProxyState, RequestEvent};
+use crate::proxy::state::{EventKind, Exchange, Origin, ProxyState, RequestEvent};
 use bytes::Bytes;
 use futures::StreamExt;
 use http::uri::{Authority, Scheme};
@@ -16,7 +16,7 @@ use hyper::server::conn::{http1, http2};
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -28,8 +28,10 @@ pub type ProxyBody = BoxBody<Bytes, std::io::Error>;
 
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 const TUNNEL_TIMEOUT: Duration = Duration::from_secs(600);
-// Rewriting means holding the whole document in memory; past this it is streamed through instead.
-const MAX_REWRITABLE_BODY: usize = 8 * 1024 * 1024;
+// HTML past this still streams, but is no longer read for ids and classes.
+const MAX_PARSED_HTML: usize = 8 * 1024 * 1024;
+// lol_html buffers a tag split across reads; a huge data: URI attribute would otherwise sit there.
+const MAX_PARSER_MEMORY: usize = 4 * 1024 * 1024;
 
 pub const HOP_BY_HOP_HEADERS: [&str; 9] = [
     "connection",
@@ -51,11 +53,38 @@ pub struct Session {
     pub intercepts: ExclusionStore,
     pub state: Arc<ProxyState>,
     pub tls_client_config: Arc<rustls::ClientConfig>,
+    /// TCP goes to the paired desktop, which owns filtering; the relay blocks nothing locally.
+    pub desktop_routing: bool,
+}
+
+impl Session {
+    /// Hosts whose TLS this session terminates when they arrive on an HTTPS port.
+    pub fn inspects(&self, host: &str) -> bool {
+        !self.exclusions.contains(host)
+            && (self.state.mode() == MitmMode::Full || self.intercepts.contains(host))
+    }
+
+    /// A DNS answer to withhold. Inspected hosts are left to URL rules so blocks keep their detail.
+    pub fn dns_block(&self, host: &str) -> Option<BlockRule> {
+        if self.desktop_routing || self.inspects(host) {
+            return None;
+        }
+        self.engine.check_host(host)
+    }
+
+    /// QUIC to refuse; the app retries over TCP, where the proxy decides again.
+    pub fn quic_block(&self, host: &str) -> Option<BlockRule> {
+        if self.desktop_routing {
+            return None;
+        }
+        self.engine.check_host(host)
+    }
 }
 
 pub async fn handle(
     session: Arc<Session>,
     request: Request<Incoming>,
+    origin: Option<Arc<Origin>>,
 ) -> Result<Response<ProxyBody>, Infallible> {
     let Some(authority) = target_authority(&request) else {
         return Ok(message_response(
@@ -65,9 +94,9 @@ pub async fn handle(
     };
 
     if request.method() == Method::CONNECT {
-        Ok(handle_connect(session, request, authority))
+        Ok(handle_connect(session, request, authority, origin))
     } else {
-        Ok(forward(session, request, authority, Scheme::HTTP).await)
+        Ok(forward(session, request, authority, Scheme::HTTP, origin).await)
     }
 }
 
@@ -77,6 +106,7 @@ fn handle_connect(
     session: Arc<Session>,
     request: Request<Incoming>,
     authority: Authority,
+    origin: Option<Arc<Origin>>,
 ) -> Response<ProxyBody> {
     let host = authority.host().to_owned();
     let logged_url = format!("https://{authority}/");
@@ -96,12 +126,14 @@ fn handle_connect(
 
     // Inspected connections must negotiate TLS first: apply URL rules to the inner
     // request, where path, headers and content type are available.
-    if tunnel_only && let Some(filter) = session.engine.check_host(&host) {
+    if tunnel_only && let Some(rule) = session.engine.check_host(&host) {
         session.state.record(
-            RequestEvent::now("CONNECT", &logged_url, EventKind::Blocked { filter }).note(
-                "Refused as the tunnel opened, on the hostname alone. Nothing was sent, so there \
-                 are no headers or body to show.",
-            ),
+            RequestEvent::now("CONNECT", &logged_url, EventKind::Blocked { rule })
+                .with_origin(origin)
+                .note(
+                    "Refused as the tunnel opened, on the hostname alone. Nothing was sent, so \
+                     there are no headers or body to show.",
+                ),
         );
         // Refusing the tunnel surfaces as a failed connection in the client, which is what an
         // ad request should look like.
@@ -143,9 +175,11 @@ fn handle_connect(
         )
     };
 
-    let exchange = session
-        .state
-        .record(RequestEvent::now("CONNECT", &logged_url, kind).note(note));
+    let exchange = session.state.record(
+        RequestEvent::now("CONNECT", &logged_url, kind)
+            .with_origin(origin.clone())
+            .note(note),
+    );
 
     tokio::spawn(async move {
         let upgraded = match hyper::upgrade::on(request).await {
@@ -170,7 +204,7 @@ fn handle_connect(
         } else {
             if tokio::time::timeout(
                 TUNNEL_TIMEOUT,
-                intercept_tls(session, upgraded, authority, exchange.clone()),
+                intercept_tls(session, upgraded, authority, exchange.clone(), origin),
             )
             .await
             .is_err()
@@ -203,6 +237,7 @@ async fn intercept_tls<T>(
     client: T,
     authority: Authority,
     exchange: Arc<Mutex<Exchange>>,
+    origin: Option<Arc<Origin>>,
 ) where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -256,7 +291,10 @@ async fn intercept_tls<T>(
     let service = service_fn(move |request| {
         let session = session.clone();
         let authority = authority.clone();
-        async move { Ok::<_, Infallible>(forward(session, request, authority, Scheme::HTTPS).await) }
+        let origin = origin.clone();
+        async move {
+            Ok::<_, Infallible>(forward(session, request, authority, Scheme::HTTPS, origin).await)
+        }
     });
 
     let result = if http2 {
@@ -321,6 +359,7 @@ async fn forward(
     request: Request<Incoming>,
     authority: Authority,
     scheme: Scheme,
+    origin: Option<Arc<Origin>>,
 ) -> Response<ProxyBody> {
     let Ok(uri) = Uri::builder()
         .scheme(scheme.clone())
@@ -346,17 +385,18 @@ async fn forward(
         // Without a referer the engine treats everything as third party and over-blocks.
         .unwrap_or_else(|| url.clone());
 
-    if let Some(filter) = session
-        .engine
-        .check(&url, &referer, request_type(request.headers()))
-    {
+    if let Some(rule) = session.engine.check(
+        &url,
+        &referer,
+        request_type(request.headers()),
+        request.method().as_str(),
+    ) {
         let exchange = session.state.record(
-            RequestEvent::now(
-                request.method().as_str(),
-                &url,
-                EventKind::Blocked { filter },
-            )
-            .note("Blocked before the request left the phone, so there is no response to show."),
+            RequestEvent::now(request.method().as_str(), &url, EventKind::Blocked { rule })
+                .with_origin(origin)
+                .note(
+                    "Blocked before the request left the phone, so there is no response to show.",
+                ),
         );
         if let Ok(mut exchange) = exchange.lock() {
             exchange.status = Some(403);
@@ -368,14 +408,12 @@ async fn forward(
     }
 
     if request.headers().contains_key(header::UPGRADE) {
-        return upgrade_through(session, request, uri, scheme).await;
+        return upgrade_through(session, request, uri, scheme, origin).await;
     }
 
-    let exchange = session.state.record(RequestEvent::now(
-        request.method().as_str(),
-        &url,
-        EventKind::Proxied,
-    ));
+    let exchange = session.state.record(
+        RequestEvent::now(request.method().as_str(), &url, EventKind::Proxied).with_origin(origin),
+    );
     if let Ok(mut open) = exchange.lock() {
         // What the client actually sent, before hop-by-hop headers are stripped for the origin.
         open.request_headers = header_pairs(request.headers());
@@ -445,7 +483,7 @@ async fn forward(
 
     let body = if is_html {
         response_headers.remove(header::CONTENT_LENGTH);
-        bounded_html_body(response, &url, &session, exchange.clone()).await
+        cosmetic_html_body(response, url, session.clone(), exchange.clone())
     } else {
         stream_body(response, exchange.clone())
     };
@@ -481,6 +519,7 @@ async fn upgrade_through(
     mut request: Request<Incoming>,
     uri: Uri,
     scheme: Scheme,
+    origin: Option<Arc<Origin>>,
 ) -> Response<ProxyBody> {
     let host = uri.host().unwrap_or_default().to_owned();
     let port = uri
@@ -496,6 +535,7 @@ async fn upgrade_through(
             &uri.to_string(),
             EventKind::Proxied,
         )
+        .with_origin(origin)
         .note(
             "Protocol upgrade — the connection is joined end to end after the handshake, so the \
              frames are not logged.",
@@ -631,66 +671,6 @@ async fn connect_origin(
     Ok(Box::new(stream))
 }
 
-/// Collects the ids and classes on the page, asks the engine which of them are ad containers, and
-/// appends a stylesheet hiding them.
-fn rewrite_html(url: &str, body: &Bytes, session: &Session) -> Bytes {
-    if !session.engine.is_enabled() {
-        return body.clone();
-    }
-    use lol_html::{HtmlRewriter, Settings, element};
-
-    let mut ids: HashSet<String> = HashSet::new();
-    let mut classes: HashSet<String> = HashSet::new();
-    let mut output: Vec<u8> = Vec::with_capacity(body.len() + 1024);
-
-    {
-        let mut rewriter = HtmlRewriter::new(
-            Settings {
-                element_content_handlers: vec![element!("*", |element| {
-                    if let Some(id) = element.get_attribute("id") {
-                        ids.insert(id);
-                    }
-                    if let Some(class) = element.get_attribute("class") {
-                        classes.extend(class.split_whitespace().map(str::to_owned));
-                    }
-                    Ok(())
-                })],
-                ..Settings::default()
-            },
-            |chunk: &[u8]| output.extend_from_slice(chunk),
-        );
-
-        if rewriter.write(body).is_err() || rewriter.end().is_err() {
-            return body.clone();
-        }
-    }
-
-    let ids: Vec<String> = ids.into_iter().collect();
-    let classes: Vec<String> = classes.into_iter().collect();
-    let cosmetic = session.engine.cosmetic(url, &ids, &classes);
-
-    if cosmetic.hidden_selectors.is_empty() && cosmetic.injected_script.is_none() {
-        return Bytes::from(output);
-    }
-
-    session.state.note_modified_response();
-
-    let mut appended = String::new();
-    if !cosmetic.hidden_selectors.is_empty() {
-        appended.push_str("<style>");
-        appended.push_str(&cosmetic.hidden_selectors.join(","));
-        appended.push_str("{display:none !important}</style>");
-    }
-    if let Some(script) = cosmetic.injected_script {
-        appended.push_str("<script type=\"application/javascript\">");
-        appended.push_str(&script);
-        appended.push_str("</script>");
-    }
-    output.extend_from_slice(appended.as_bytes());
-
-    Bytes::from(output)
-}
-
 /// The authority the request targets: absolute-form URI first, then the Host header.
 fn target_authority(request: &Request<Incoming>) -> Option<Authority> {
     if let Some(authority) = request.uri().authority() {
@@ -767,37 +747,156 @@ fn stream_body(response: reqwest::Response, exchange: Arc<Mutex<Exchange>>) -> P
         .boxed()
 }
 
-/// Buffer HTML only up to the rewrite limit, then release the prefix and stream the remainder.
-async fn bounded_html_body(
+#[derive(Default)]
+struct Found {
+    ids: HashSet<String>,
+    classes: HashSet<String>,
+}
+
+/// Reads ids and classes from a copy of the page; the page itself is forwarded as it arrives.
+struct Collector {
+    rewriter: Option<lol_html::send::HtmlRewriter<'static, fn(&[u8])>>,
+    found: Arc<Mutex<Found>>,
+    parsed: usize,
+}
+
+impl Collector {
+    fn new() -> Self {
+        use lol_html::{MemorySettings, element, send};
+
+        let found = Arc::new(Mutex::new(Found::default()));
+        let into = found.clone();
+        let settings = send::Settings::new_send()
+            .with_memory_settings(
+                MemorySettings::new().with_max_allowed_memory_usage(MAX_PARSER_MEMORY),
+            )
+            .append_element_content_handler(element!("*", move |element| {
+                if let Ok(mut found) = into.lock() {
+                    if let Some(id) = element.get_attribute("id") {
+                        found.ids.insert(id);
+                    }
+                    if let Some(class) = element.get_attribute("class") {
+                        found.classes.extend(class.split_whitespace().map(str::to_owned));
+                    }
+                }
+                Ok(())
+            }));
+        let discard: fn(&[u8]) = |_| {};
+        Self {
+            rewriter: Some(send::HtmlRewriter::new(settings, discard)),
+            found,
+            parsed: 0,
+        }
+    }
+
+    fn feed(&mut self, chunk: &[u8]) {
+        let Some(rewriter) = self.rewriter.as_mut() else {
+            return;
+        };
+        self.parsed = self.parsed.saturating_add(chunk.len());
+        // A parse error or the budget ends collection; what was found still counts.
+        if self.parsed > MAX_PARSED_HTML || rewriter.write(chunk).is_err() {
+            self.rewriter = None;
+        }
+    }
+
+    /// The hiding stylesheet and scriptlets for everything collected.
+    fn finish(&mut self, url: &str, session: &Session) -> Option<Bytes> {
+        if let Some(rewriter) = self.rewriter.take() {
+            let _ = rewriter.end();
+        }
+        let found = std::mem::take(&mut *self.found.lock().ok()?);
+        let ids: Vec<String> = found.ids.into_iter().collect();
+        let classes: Vec<String> = found.classes.into_iter().collect();
+        let cosmetic = session.engine.cosmetic(url, &ids, &classes);
+        if cosmetic.hidden_selectors.is_empty() && cosmetic.injected_script.is_none() {
+            return None;
+        }
+
+        session.state.note_modified_response();
+
+        let mut appended = String::new();
+        if !cosmetic.hidden_selectors.is_empty() {
+            appended.push_str("<style>");
+            appended.push_str(&cosmetic.hidden_selectors.join(","));
+            appended.push_str("{display:none !important}</style>");
+        }
+        if let Some(script) = cosmetic.injected_script {
+            appended.push_str("<script type=\"application/javascript\">");
+            appended.push_str(&script);
+            appended.push_str("</script>");
+        }
+        Some(Bytes::from(appended))
+    }
+}
+
+/// Streams HTML through unchanged, then appends the stylesheet for the ids and classes it held.
+fn cosmetic_html_body(
     response: reqwest::Response,
-    url: &str,
-    session: &Session,
+    url: String,
+    session: Arc<Session>,
     exchange: Arc<Mutex<Exchange>>,
 ) -> ProxyBody {
-    let mut body = reqwest::Body::from(response);
-    let mut prefix = bytes::BytesMut::new();
-    while let Some(frame) = body.frame().await {
-        match frame {
-            Ok(frame)
-                if frame.data_ref().is_some_and(|data| {
-                    prefix.len().saturating_add(data.len()) <= MAX_REWRITABLE_BODY
-                }) =>
-            {
-                prefix.extend_from_slice(frame.data_ref().unwrap());
-            }
-            // Includes trailers: preserve them, and skip rewriting this response.
-            frame => {
-                let start = futures::stream::iter([Ok(Frame::data(prefix.freeze())), frame]);
-                let stream = start.chain(BodyStream::new(body));
-                return CaptureBody::new(StreamBody::new(stream), exchange, false)
-                    .map_err(std::io::Error::other)
-                    .boxed();
+    struct State {
+        upstream: BodyStream<reqwest::Body>,
+        // Mutex only for Sync: the body is polled by one task at a time.
+        collector: Mutex<Collector>,
+        queued: VecDeque<Frame<Bytes>>,
+        done: bool,
+        url: String,
+        session: Arc<Session>,
+    }
+
+    impl State {
+        fn finish(&mut self) {
+            self.done = true;
+            let collector = self.collector.get_mut().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(tail) = collector.finish(&self.url, &self.session) {
+                self.queued.push_back(Frame::data(tail));
             }
         }
     }
-    let rewritten = rewrite_html(url, &prefix.freeze(), session);
-    CaptureBody::new(Full::new(rewritten), exchange, false)
-        .map_err(|never| match never {})
+
+    let state = State {
+        upstream: BodyStream::new(reqwest::Body::from(response)),
+        collector: Mutex::new(Collector::new()),
+        queued: VecDeque::new(),
+        done: false,
+        url,
+        session,
+    };
+    let stream = futures::stream::unfold(state, |mut state| async move {
+        loop {
+            if let Some(frame) = state.queued.pop_front() {
+                return Some((Ok(frame), state));
+            }
+            if state.done {
+                return None;
+            }
+            match state.upstream.next().await {
+                Some(Ok(frame)) => {
+                    if let Some(data) = frame.data_ref() {
+                        state
+                            .collector
+                            .get_mut()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .feed(data);
+                        return Some((Ok(frame), state));
+                    }
+                    // Trailers end the body, so the stylesheet goes ahead of them.
+                    state.finish();
+                    state.queued.push_back(frame);
+                }
+                Some(Err(error)) => {
+                    state.done = true;
+                    return Some((Err(error), state));
+                }
+                None => state.finish(),
+            }
+        }
+    });
+    CaptureBody::new(StreamBody::new(stream), exchange, false)
+        .map_err(std::io::Error::other)
         .boxed()
 }
 

@@ -43,11 +43,9 @@ impl Loaded {
         if let Some(mut previous) = self.proxy.take() {
             previous.stop();
         }
-        self.proxy = Some(ProxyHandle::start(
-            &self.config,
-            self.paths.clone(),
-            self.state.clone(),
-        ));
+        let proxy = ProxyHandle::start(&self.config, self.paths.clone(), self.state.clone());
+        self.vpn.link().set(proxy.session());
+        self.proxy = Some(proxy);
         if self.config.foreground_service {
             self.vpn
                 .keep_alive(&format!("Proxy on 127.0.0.1:{}", self.config.listen_port));
@@ -58,6 +56,7 @@ impl Loaded {
         if let Some(mut proxy) = self.proxy.take() {
             proxy.stop();
         }
+        self.vpn.link().set(None);
         // Capture without a proxy to relay into would leave every app without a network.
         self.vpn.shutdown();
         self.state.set_status(Status::Stopped);
@@ -80,6 +79,7 @@ impl Loaded {
             mtu: TUN_MTU,
             capture_ipv6: self.config.capture_ipv6,
             block_quic: self.config.block_quic,
+            block_dns: self.config.block_dns,
             dns: self.config.dns_servers(),
         });
     }
@@ -425,12 +425,18 @@ impl PrivaxyApp {
 
     fn header(&mut self, ui: &mut egui::Ui, host: &Host) {
         ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new("Privaxy")
-                    .size(16.0)
-                    .strong()
-                    .color(ui.visuals().hyperlink_color),
-            );
+            let title = egui::RichText::new("Privaxy")
+                .size(16.0)
+                .strong()
+                .color(ui.visuals().hyperlink_color);
+            if ui
+                .add(egui::Button::new(title).frame_when_inactive(false))
+                .clicked()
+                && self.tab != Tab::Dashboard
+            {
+                self.tab = Tab::Dashboard;
+                host.haptic(Haptic::Selection);
+            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let Some(loaded) = self.loaded.as_mut() else {
@@ -505,36 +511,35 @@ impl PrivaxyApp {
     }
 
     fn tab_bar(&mut self, ui: &mut egui::Ui, host: &Host) {
-        egui::ScrollArea::horizontal()
-            .id_salt("title-tabs")
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    for tab in Tab::ALL {
-                        let selected = self.tab == tab;
-                        // White on the violet chip, not violet on violet — the latter was 2:1.
-                        let text = egui::RichText::new(tab.label()).size(13.0).strong().color(
-                            if selected {
-                                ui::ON_ACCENT
-                            } else {
-                                ui.visuals().weak_text_color()
-                            },
-                        );
-
-                        if ui
-                            .add_sized(
-                                [0.0, ui::TOUCH_HEIGHT],
-                                egui::Button::selectable(selected, (tab.icon().image(16.0), text))
-                                    .image_tint_follows_text_color(true),
-                            )
-                            .clicked()
-                            && !selected
-                        {
-                            self.tab = tab;
-                            host.haptic(Haptic::Selection);
-                        }
-                    }
+        ui.horizontal(|ui| {
+            let gaps = ui.spacing().item_spacing.x * (Tab::ALL.len() - 1) as f32;
+            let width = (ui.available_width() - gaps) / Tab::ALL.len() as f32;
+            for tab in Tab::ALL {
+                let selected = self.tab == tab;
+                // White on the violet chip, not violet on violet — the latter was 2:1.
+                let tint = if selected {
+                    ui::ON_ACCENT
+                } else {
+                    ui.visuals().weak_text_color()
+                };
+                let response = ui.add_sized(
+                    [width, ui::TOUCH_HEIGHT],
+                    egui::Button::selectable(selected, tab.icon().image(22.0).tint(tint)),
+                );
+                response.widget_info(|| {
+                    egui::WidgetInfo::selected(
+                        egui::Role::Tab,
+                        ui.is_enabled(),
+                        selected,
+                        tab.label(),
+                    )
                 });
-            });
+                if response.on_hover_text(tab.label()).clicked() && !selected {
+                    self.tab = tab;
+                    host.haptic(Haptic::Selection);
+                }
+            }
+        });
     }
 }
 
@@ -686,14 +691,17 @@ impl PrivaxyApp {
         // to the list underneath it.
         let top = egui::Panel::top("header")
             .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 3)))
-            .show(ui, |ui| {
-                self.header(ui, host);
-                self.tab_bar(ui, host);
-            })
+            .show(ui, |ui| self.header(ui, host))
             .response
             .rect;
 
-        let bottom = egui::Rect::NOTHING;
+        // Hidden while typing: focus leads the keyboard in and its inset trails it out.
+        let mut tabs_open = !(host.keyboard_height() > 1.0 || ui.ctx().text_edit_focused());
+        let bottom = egui::Panel::bottom("tabs")
+            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 4)))
+            .drag_to_open(false)
+            .show_collapsible(ui, &mut tabs_open, |ui| self.tab_bar(ui, host))
+            .map_or(egui::Rect::NOTHING, |bar| bar.response.rect);
 
         // Stashed for the next frame to frost: the rect is only known now, and the blur has to be
         // enqueued before the content paints.
@@ -757,6 +765,8 @@ impl PrivaxyApp {
                 }
 
                 egui::ScrollArea::vertical()
+                    // Each tab keeps its own scroll position.
+                    .id_salt(self.tab.label())
                     .auto_shrink([false, false])
                     // The request log is long and its position matters; the bar doubles as the
                     // "how far down am I" readout, so it stays drawn rather than fading in.
@@ -855,6 +865,79 @@ mod startup_tests {
         wait(&loaded, |s| s.is_running());
         loaded.stop_proxy();
         assert!(matches!(loaded.state.status(), Status::Stopped));
+        drop(loaded);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn the_relay_link_follows_the_proxy_and_registered_origins_reach_its_rows() {
+        use crate::proxy::state::{App, NamedBy, Origin};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let directory = std::env::temp_dir().join(format!("privaxy-origin-{}", std::process::id()));
+        let paths = Paths::new(&directory);
+        let mut config = paths.load_or_create().unwrap();
+        config.filters.clear();
+        config.foreground_service = false;
+        config.listen_port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let proxy: std::net::SocketAddr = ([127, 0, 0, 1], config.listen_port).into();
+        let state = Arc::new(ProxyState::new(config.mode));
+        let mut loaded = Loaded {
+            paths,
+            config,
+            state: state.clone(),
+            proxy: None,
+            vpn: VpnController::new(),
+            desktop: Default::default(),
+            certificate_check: Default::default(),
+            desktop_certificate_check: Default::default(),
+        };
+        loaded.start_proxy();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !state.status().is_running() {
+            assert!(Instant::now() < deadline, "status: {:?}", state.status());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(loaded.vpn.link().session().is_some());
+
+        let origin = Arc::new(Origin {
+            app: Some(Arc::new(App {
+                uid: 10123,
+                package: Some("com.example.chat".into()),
+                label: Some("Chat".into()),
+            })),
+            destination: "192.0.2.7:9".parse().unwrap(),
+            named_by: NamedBy::Dns,
+        });
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            // As the relay dials: register the port, then connect from it.
+            let socket = tokio::net::TcpSocket::new_v4().unwrap();
+            socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            state.expect_origin(socket.local_addr().unwrap().port(), origin.clone());
+            let mut stream = socket.connect(proxy).await.unwrap();
+            stream
+                .write_all(b"CONNECT 127.0.0.1:9 HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n")
+                .await
+                .unwrap();
+            let mut reply = [0_u8; 32];
+            let count = stream.read(&mut reply).await.unwrap();
+            assert!(reply[..count].starts_with(b"HTTP/1.1 200"));
+        });
+        let event = state
+            .recent_events(5)
+            .into_iter()
+            .find(|event| event.method == "CONNECT")
+            .unwrap();
+        assert_eq!(event.origin.as_ref(), Some(&origin));
+        assert_eq!(event.app().unwrap().describe(), "Chat (com.example.chat)");
+
+        loaded.stop_proxy();
+        assert!(loaded.vpn.link().session().is_none());
         drop(loaded);
         let _ = std::fs::remove_dir_all(directory);
     }

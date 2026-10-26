@@ -40,6 +40,7 @@ pub struct ProxyHandle {
     runtime: Option<tokio::runtime::Runtime>,
     shutdown: Option<oneshot::Sender<()>>,
     pub state: Arc<ProxyState>,
+    session: Option<Arc<Session>>,
     engine: Arc<FilterEngine>,
     exclusions: ExclusionStore,
     intercepts: ExclusionStore,
@@ -101,6 +102,7 @@ impl ProxyHandle {
             intercepts: intercepts.clone(),
             state: state.clone(),
             tls_client_config: Arc::new(client_tls_config()),
+            desktop_routing: config.desktop_enabled,
         });
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -120,7 +122,7 @@ impl ProxyHandle {
             .flatten();
         let serving = serve(
             desktop,
-            session,
+            session.clone(),
             bind_address,
             share_on_network,
             shutdown_rx,
@@ -158,6 +160,7 @@ impl ProxyHandle {
             runtime: Some(runtime),
             shutdown: Some(shutdown_tx),
             state,
+            session: Some(session),
             engine,
             exclusions,
             intercepts,
@@ -173,6 +176,7 @@ impl ProxyHandle {
             runtime: None,
             shutdown: None,
             state,
+            session: None,
             engine: Arc::new(FilterEngine::empty()),
             exclusions: ExclusionStore::default(),
             intercepts: ExclusionStore::default(),
@@ -202,6 +206,11 @@ impl ProxyHandle {
             runtime.shutdown_background();
         }
         self.state.set_status(Status::Stopped);
+    }
+
+    /// The running session's filtering, for the VPN relay. `None` once stopped.
+    pub fn session(&self) -> Option<Arc<Session>> {
+        self.runtime.as_ref().and(self.session.clone())
     }
 
     pub fn set_blocking_enabled(&self, enabled: bool) {
@@ -383,10 +392,10 @@ async fn serve(
     let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     loop {
-        let stream = tokio::select! {
+        let (stream, peer) = tokio::select! {
             _ = &mut shutdown => break,
             accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => stream,
+                Ok(accepted) => accepted,
                 Err(error) => {
                     log::warn!("Accept failed: {error}");
                     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -394,6 +403,13 @@ async fn serve(
                 }
             },
         };
+
+        // Loopback only: a LAN client's port could collide with a relay registration.
+        let origin = peer
+            .ip()
+            .is_loopback()
+            .then(|| state.take_origin(peer.port()))
+            .flatten();
 
         if connections.load(std::sync::atomic::Ordering::Relaxed) >= MAX_CONNECTIONS {
             log::warn!("Connection limit reached, dropping connection");
@@ -421,7 +437,7 @@ async fn serve(
                 return;
             }
             let service = hyper::service::service_fn(move |request| {
-                session::handle(session.clone(), request)
+                session::handle(session.clone(), request, origin.clone())
             });
 
             let result = hyper::server::conn::http1::Builder::new()
@@ -523,13 +539,13 @@ async fn load_filters(
         total,
     });
 
-    let mut lists = Vec::with_capacity(total + 1);
+    let mut lists: Vec<blocker::FilterList> = Vec::with_capacity(total + 1);
     let mut failures = Vec::new();
 
     for (index, filter) in enabled.iter().enumerate() {
         if !force {
             if let Some(cached) = paths.cached_filter(filter) {
-                lists.push(cached);
+                lists.push((filter.title.clone(), cached));
                 state.set_filters_status(FiltersStatus::Updating {
                     completed: index + 1,
                     total,
@@ -543,13 +559,13 @@ async fn load_filters(
                 if let Err(error) = paths.cache_filter(filter, &contents) {
                     log::warn!("Could not cache {}: {error}", filter.title);
                 }
-                lists.push(contents);
+                lists.push((filter.title.clone(), contents));
             }
             Err(error) => {
                 log::warn!("Could not download {}: {error}", filter.title);
                 // A stale copy still blocks; only a list never fetched is a real gap.
                 match paths.cached_filter(filter) {
-                    Some(cached) => lists.push(cached),
+                    Some(cached) => lists.push((filter.title.clone(), cached)),
                     None => failures.push(filter.title.clone()),
                 }
             }
@@ -562,12 +578,12 @@ async fn load_filters(
     }
 
     if !custom.is_empty() {
-        lists.push(custom.join("\n"));
+        lists.push((String::from("Custom rules"), custom.join("\n")));
     }
 
     let loaded = lists.len();
     // Parsing a full list set is seconds of CPU; keep it off the runtime's worker threads.
-    let _ = tokio::task::spawn_blocking(move || engine.replace(&lists)).await;
+    let _ = tokio::task::spawn_blocking(move || engine.replace(lists)).await;
 
     state.set_filters_status(if failures.is_empty() {
         FiltersStatus::Ready { lists: loaded }

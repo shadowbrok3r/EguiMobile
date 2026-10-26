@@ -274,6 +274,9 @@ pub struct Config {
     /// Drop UDP 443 so QUIC apps fall back to TCP, which the proxy can see.
     #[serde(default = "yes")]
     pub block_quic: bool,
+    /// Answer DNS queries for filtered hosts with the unspecified address.
+    #[serde(default = "yes")]
+    pub block_dns: bool,
     /// Resolvers handed to captured apps, comma separated.
     #[serde(default = "default_vpn_dns")]
     pub vpn_dns: String,
@@ -319,6 +322,7 @@ impl Config {
             foreground_service: true,
             capture_ipv6: true,
             block_quic: true,
+            block_dns: true,
             vpn_dns: default_vpn_dns(),
             request_filters: crate::ui::requests::RequestFilters::default(),
             inspect_wrap: true,

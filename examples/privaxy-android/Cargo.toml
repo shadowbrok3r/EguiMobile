@@ -2,7 +2,7 @@
 name = "privaxy_android"
 # Android versionCode is derived from this: (1<<24)|(major<<16)|(minor<<8)|patch.
 # Bump before every release build — the phone only offers an update whose code is strictly greater.
-version = "0.5.13"
+version = "0.6.1"
 edition = "2024"
 publish = false
 
@@ -21,7 +21,7 @@ egui_json_tree = { path = "../../patches/egui-json-tree", features = ["serde_jso
 
 
 # Proxy core.
-base64 = "0.22"
+base64 = "0.23"
 hyper = { version = "1", features = ["server", "client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http = "1"
@@ -41,7 +41,7 @@ rcgen = { version = "0.14", default-features = false, features = ["pem", "ring",
 x509-parser = "0.18"
 
 # Filter engine — same crate the desktop build uses; its whole tree is pure Rust.
-adblock = { version = "0.12", default-features = false, features = ["embedded-domain-resolver", "full-regex-handling"] }
+adblock = { version = "0.13", default-features = false, features = ["embedded-domain-resolver", "full-regex-handling"] }
 
 # Upstream client. rustls-no-provider avoids rustls-platform-verifier, which needs Android Java
 # helper classes we do not bundle and panics uninitialized; roots come from webpki-roots instead.
@@ -56,8 +56,8 @@ reqwest = { version = "0.13", default-features = false, features = [
 ] }
 webpki-roots = "1"
 
-# Cosmetic filtering: collect ids/classes and inject the hiding stylesheet.
-lol_html = "2"
+# Cosmetic filtering: collect ids/classes from a copy of the page and append the hiding stylesheet.
+lol_html = "3"
 
 # VpnService capture: a userspace TCP/IP stack over the tun descriptor. Chosen over `tun2proxy`,
 # which is a CLI application shipped as a library (clap, daemonize, ctrlc2, env_logger and a second
@@ -162,6 +162,9 @@ name = "android.permission.ACCESS_NETWORK_STATE"
 name = "android.permission.VIBRATE"
 [[package.metadata.android.uses_permission]]
 name = "android.permission.POST_NOTIFICATIONS"
+# Naming the app behind each captured connection; package visibility hides other apps otherwise.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.QUERY_ALL_PACKAGES"
 # Writing the CA certificate somewhere Settings' "Install from storage" picker can reach it.
 [[package.metadata.android.uses_permission]]
 name = "android.permission.READ_EXTERNAL_STORAGE"

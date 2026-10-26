@@ -127,13 +127,14 @@ impl Harness {
             intercepts: ExclusionStore::new(vec!["localhost".into()]),
             state: Arc::new(ProxyState::new(MitmMode::Full)),
             tls_client_config: Arc::new(tls.clone()),
+            desktop_routing: false,
         });
         let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
         let shared = session.clone();
         let proxy_task = tokio::spawn(async move {
             let (stream, _) = proxy.accept().await.unwrap();
-            let service = service_fn(move |request| handle(shared.clone(), request));
+            let service = service_fn(move |request| handle(shared.clone(), request, None));
             let _ = http1::Builder::new()
                 .serve_connection(TokioIo::new(stream), service)
                 .with_upgrades()
@@ -314,48 +315,67 @@ async fn http1_still_works_and_unknown_encoding_is_not_stripped_or_rewritten() {
 }
 
 #[tokio::test]
-async fn oversized_html_starts_streaming_without_waiting_for_eof() {
+async fn html_streams_before_eof() {
     let fixture = Harness::new(false).await;
-    let frames: Vec<Result<_, std::io::Error>> = vec![
-        Ok(Frame::data(Bytes::from(vec![b'a'; MAX_REWRITABLE_BODY]))),
-        Ok(Frame::data(Bytes::from_static(b"overflow"))),
-    ];
+    let first = b"<div class=\"ad\">first</div>";
+    let frames: Vec<Result<_, std::io::Error>> = vec![Ok(Frame::data(Bytes::from_static(first)))];
     let stream = futures::stream::iter(frames).chain(futures::stream::pending());
     let response =
         reqwest::Response::from(Response::new(reqwest::Body::wrap(StreamBody::new(stream))));
     let exchange = Arc::new(Mutex::new(Exchange::for_test()));
-    let mut body = tokio::time::timeout(
-        Duration::from_secs(1),
-        bounded_html_body(
-            response,
-            "https://localhost/large",
-            &fixture.session,
-            exchange.clone(),
-        ),
-    )
-    .await
-    .expect("must not collect an unbounded HTML stream");
-    assert_eq!(
-        body.frame()
-            .await
-            .unwrap()
-            .unwrap()
-            .data_ref()
-            .unwrap()
-            .len(),
-        MAX_REWRITABLE_BODY
+    let mut body = cosmetic_html_body(
+        response,
+        "https://localhost/page".into(),
+        fixture.session.clone(),
+        exchange.clone(),
     );
-    assert_eq!(
-        body.frame().await.unwrap().unwrap().data_ref().unwrap(),
-        b"overflow".as_slice()
-    );
+    let frame = tokio::time::timeout(Duration::from_secs(1), body.frame())
+        .await
+        .expect("must not wait for the end of the document")
+        .unwrap()
+        .unwrap();
+    assert_eq!(frame.data_ref().unwrap(), first.as_slice());
     let open = exchange.lock().unwrap();
-    assert_eq!(open.response_body.seen(), (MAX_REWRITABLE_BODY + 8) as u64);
-    assert_eq!(
-        open.response_body.snapshot().len,
-        (MAX_REWRITABLE_BODY + 8) as u64
-    );
+    assert_eq!(open.response_body.seen(), first.len() as u64);
     assert!(open.finished_at.is_none());
+}
+
+#[tokio::test]
+async fn the_stylesheet_follows_the_page_and_parsing_stops_at_the_budget() {
+    let fixture = Harness::new(false).await;
+    fixture
+        .session
+        .engine
+        .replace(vec![("Test".into(), "##.ad\n##.late".into())]);
+    let head = b"<html><body><div class=\"ad\">x</div>".to_vec();
+    let filler = vec![b' '; MAX_PARSED_HTML];
+    let late = b"<p class=\"late\">y</p></body></html>".to_vec();
+    let frames: Vec<Result<_, std::io::Error>> = vec![
+        Ok(Frame::data(Bytes::from(head.clone()))),
+        Ok(Frame::data(Bytes::from(filler))),
+        Ok(Frame::data(Bytes::from(late.clone()))),
+    ];
+    let response = reqwest::Response::from(Response::new(reqwest::Body::wrap(StreamBody::new(
+        futures::stream::iter(frames),
+    ))));
+    let exchange = Arc::new(Mutex::new(Exchange::for_test()));
+    let page = cosmetic_html_body(
+        response,
+        "https://localhost/page".into(),
+        fixture.session.clone(),
+        exchange.clone(),
+    )
+    .collect()
+    .await
+    .unwrap()
+    .to_bytes();
+    // `.late` arrives past the budget, so only `.ad` is hidden; every byte still arrives.
+    let style = b"<style>.ad{display:none !important}</style>";
+    assert!(page.starts_with(&head));
+    assert!(page.ends_with(style));
+    assert_eq!(page.len(), head.len() + MAX_PARSED_HTML + late.len() + style.len());
+    assert_eq!(&page[head.len() + MAX_PARSED_HTML..][..late.len()], late.as_slice());
+    assert_eq!(fixture.session.state.counters.snapshot().modified, 1);
 }
 
 #[test]
@@ -391,7 +411,10 @@ fn connection_nominated_headers_are_removed_but_trailer_support_survives() {
 async fn full_inspection_allows_connect_before_blocking_the_inner_request() {
     for h2 in [false, true] {
         let fixture = Harness::new(h2).await;
-        fixture.session.engine.replace(&["||localhost^".into()]);
+        fixture
+            .session
+            .engine
+            .replace(vec![("Test".into(), "||localhost^".into())]);
         let response = fixture
             .client
             .get(format!("{}/blocked-path", fixture.origin))
@@ -427,7 +450,7 @@ async fn observe_only_allows_blocked_hosts_without_rewriting_html_and_still_capt
     let h = Harness::new(false).await;
     h.session
         .engine
-        .replace(&["||localhost^\nlocalhost##.ad".into()]);
+        .replace(vec![("Test".into(), "||localhost^\nlocalhost##.ad".into())]);
     let url = format!("{}/html", h.origin);
     let blocked = h.client.post(&url).body("blocked").send().await.unwrap();
     assert_eq!(blocked.status(), StatusCode::FORBIDDEN);

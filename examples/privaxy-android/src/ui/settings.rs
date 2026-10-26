@@ -200,6 +200,7 @@ pub fn pairing(app: &mut PrivaxyApp, ui: &mut egui::Ui, _host: &Host) {
         }
         if icons::button(ui, svg::SCROLL, "View diagnostic logs").clicked() {
             app.logs.open = true;
+            app.logs.reveal = true;
             app.tab = super::Tab::Settings;
         }
         ui.label("Desktop IP or hostname");
@@ -328,24 +329,17 @@ pub fn forget_desktop_confirmation(app: &mut PrivaxyApp, ctx: &egui::Context) {
     app.notice = Some("Desktop pairing forgotten. Desktop routing is off.".into());
 }
 
+/// Lays out `add` with a full screen of height, so nested scroll areas deep in the page keep their size.
+fn with_screen_height<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let size = egui::vec2(ui.available_width(), ui.ctx().content_rect().height());
+    let rect = egui::Rect::from_min_size(ui.cursor().min, size);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), add).inner
+}
+
 pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
-    super::diagnostics::show(app, ui);
-    ui.add_space(10.0);
     let Some(loaded) = app.loaded.as_mut() else {
         return;
     };
-    ui::card(ui, |ui| {
-        if egui_mobile::theme::editor(
-            ui,
-            &mut loaded.config.appearance,
-            egui_mobile::theme::Density::Touch,
-        ) {
-            if let Err(error) = loaded.save() {
-                app.notice = Some(error);
-            }
-        }
-    });
-    ui.add_space(10.0);
 
     ui::card(ui, |ui| {
         ui::section_title(ui, "Listener");
@@ -378,8 +372,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
         if loaded.config.share_on_network {
             ui.label(
                 egui::RichText::new(
-                    "The proxy binds every interface. Anyone on the same network can route \
-                     traffic through this phone.",
+                    "Anyone on the same network can route traffic through this phone.",
                 )
                 .size(12.0)
                 .color(ui::WARN),
@@ -447,8 +440,8 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
         }
         ui.label(
             egui::RichText::new(
-                "Runs a foreground service with an ongoing notification. Without it Android \
-                 reclaims the process once the app is backgrounded, and the proxy goes with it.",
+                "Shows an ongoing notification so Android does not stop the proxy in the \
+                 background.",
             )
             .size(12.0)
             .color(ui.visuals().weak_text_color()),
@@ -462,7 +455,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
         }
         if !loaded.config.capture_ipv6 {
             ui.label(
-                egui::RichText::new("IPv6 traffic bypasses the proxy entirely while this is off.")
+                egui::RichText::new("IPv6 bypasses the proxy while this is off.")
                     .size(12.0)
                     .color(ui::WARN),
             );
@@ -479,19 +472,45 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
         }
         ui.label(
             egui::RichText::new(
-                "An HTTP proxy carries no datagrams, so QUIC would pass unfiltered. Dropping it \
-                 makes apps fall back to TCP, where the proxy sees the traffic.",
+                "Apps fall back to TCP, where requests can be inspected. When off, QUIC is still \
+                 logged and blocked per host, but unreadable.",
+            )
+            .size(12.0)
+            .color(ui.visuals().weak_text_color()),
+        );
+
+        ui.add_space(4.0);
+        let mut block_dns = loaded.config.block_dns;
+        if ui
+            .checkbox(&mut block_dns, "Block filtered hosts at DNS")
+            .changed()
+        {
+            loaded.config.block_dns = block_dns;
+            let _ = loaded.save();
+        }
+        ui.label(
+            egui::RichText::new(
+                "Blocked hosts resolve to 0.0.0.0, which also stops QUIC and other UDP. Apps \
+                 with their own encrypted DNS, or Private DNS set to a hostname, bypass it.",
             )
             .size(12.0)
             .color(ui.visuals().weak_text_color()),
         );
 
         ui.add_space(8.0);
-        ui.label(egui::RichText::new("Resolvers for captured apps").size(12.0));
+        ui.label(egui::RichText::new("Upstream resolvers").size(12.0));
         ui.add(
             egui::TextEdit::singleline(&mut app.vpn_dns_text)
                 .desired_width(ui.available_width())
                 .hint_text("1.1.1.1,1.0.0.1"),
+        );
+        ui.label(
+            egui::RichText::new(format!(
+                "Captured apps resolve through {} inside the VPN, which forwards to these.",
+                crate::vpn::VIRTUAL_DNS
+            ))
+            .size(12.0)
+            .color(ui.visuals().weak_text_color()),
         );
 
         ui.add_space(10.0);
@@ -520,14 +539,92 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
 
     ui.add_space(10.0);
 
-    if loaded.config.desktop_pairing.is_some() {
-        ui::card(ui, |ui| {
-            if let Some(message) = desktop_ca_help(loaded, ui, host) {
-                app.notice = Some(message);
+    ui::card(ui, |ui| {
+        ui::section_title(ui, "Inspect these hosts");
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(
+                "Inspected even in hostname-only mode. Never intercept wins if a host is on both \
+                 lists.",
+            )
+            .size(12.0)
+            .color(ui.visuals().weak_text_color()),
+        );
+        ui.add_space(6.0);
+
+        let intercepts: Vec<String> = loaded.config.intercepts.iter().cloned().collect();
+        match ui::chips::editor(
+            ui,
+            "intercepts",
+            &intercepts,
+            &mut app.intercepts_draft,
+            "api.example.com",
+            "Nothing named — hostname-only mode tunnels everything.",
+            host,
+        ) {
+            ui::chips::Action::Added(entry) => {
+                let mut next = intercepts;
+                next.push(entry);
+                loaded.set_intercepts(next);
+                app.notice = Some(String::from("Intercept list saved."));
             }
-        });
-        ui.add_space(10.0);
-    }
+            ui::chips::Action::Removed(entry) => {
+                loaded.set_intercepts(
+                    intercepts
+                        .into_iter()
+                        .filter(|item| item != &entry)
+                        .collect(),
+                );
+            }
+            ui::chips::Action::None => {}
+        }
+    });
+
+    ui.add_space(10.0);
+
+    ui::card(ui, |ui| {
+        ui::section_title(ui, "Never intercept");
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(
+                "Always tunneled untouched, for certificate-pinned apps. *.example.com covers \
+                 subdomains.",
+            )
+            .size(12.0)
+            .color(ui.visuals().weak_text_color()),
+        );
+        ui.add_space(6.0);
+
+        let exclusions: Vec<String> = loaded.config.exclusions.iter().cloned().collect();
+        match ui::chips::editor(
+            ui,
+            "exclusions",
+            &exclusions,
+            &mut app.exclusions_draft,
+            "*.bank.example",
+            "Nothing excluded — every host follows the interception mode.",
+            host,
+        ) {
+            ui::chips::Action::Added(entry) => {
+                let mut next = exclusions;
+                next.push(entry);
+                loaded.set_exclusions(next);
+                app.notice = Some(String::from("Never-intercept list saved."));
+            }
+            ui::chips::Action::Removed(entry) => {
+                loaded.set_exclusions(
+                    exclusions
+                        .into_iter()
+                        .filter(|item| item != &entry)
+                        .collect(),
+                );
+            }
+            ui::chips::Action::None => {}
+        }
+    });
+
+    ui.add_space(10.0);
+
     ui::card(ui, |ui| {
         ui::section_title(ui, "Android inspection CA");
         ui.add_space(6.0);
@@ -541,7 +638,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                 ui.visuals().weak_text_color()
             },
         ));
-        ui.label(egui::RichText::new("This checks the Android app's own CA only, used for local inspection. It does not check the desktop CA. Each client app chooses which CAs it trusts; actual rejections appear in Requests > Failed.").size(12.0).color(ui.visuals().weak_text_color()));
+        ui.label(egui::RichText::new("Each app chooses which CAs it trusts; rejections appear in Requests > Failed.").size(12.0).color(ui.visuals().weak_text_color()));
         if icons::button(ui, svg::ARROWS_CLOCKWISE, "Check certificate again").clicked() {
             loaded.certificate_check.invalidate();
             loaded.certificate_check.update(&loaded.config.ca);
@@ -549,10 +646,9 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
         ui.add_space(6.0);
         ui.label(
             egui::RichText::new(
-                "Only needed for full inspection. Android will not let an app install a CA \
-                 certificate itself, so: save the file, then in Settings go to Security > \
-                 Encryption & credentials > Install a certificate > CA certificate and pick \
-                 privaxy-ca.crt from Downloads.",
+                "Needed only for inspection. Save it, then install privaxy-ca.crt from Android \
+                 Settings > Security > Encryption & credentials > Install a certificate > CA \
+                 certificate.",
             )
             .size(12.0)
             .color(ui.visuals().weak_text_color()),
@@ -641,93 +737,29 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
 
     ui.add_space(10.0);
 
-    ui::card(ui, |ui| {
-        ui::section_title(ui, "Inspect these hosts");
-        ui.add_space(6.0);
-        ui.label(
-            egui::RichText::new(
-                "Terminated even in hostname-only mode, so you can read a few hosts without \
-                 switching the whole device to Full inspection — which breaks every app that does \
-                 not trust the certificate. Never intercept wins if a host is on both lists.",
-            )
-            .size(12.0)
-            .color(ui.visuals().weak_text_color()),
-        );
-        ui.add_space(6.0);
-
-        let intercepts: Vec<String> = loaded.config.intercepts.iter().cloned().collect();
-        match ui::chips::editor(
-            ui,
-            "intercepts",
-            &intercepts,
-            &mut app.intercepts_draft,
-            "api.example.com",
-            "Nothing named — hostname-only mode tunnels everything.",
-            host,
-        ) {
-            ui::chips::Action::Added(entry) => {
-                let mut next = intercepts;
-                next.push(entry);
-                loaded.set_intercepts(next);
-                app.notice = Some(String::from("Intercept list saved."));
+    with_screen_height(ui, |ui| {
+        ui::card(ui, |ui| {
+            if egui_mobile::theme::editor(
+                ui,
+                &mut loaded.config.appearance,
+                egui_mobile::theme::Density::Touch,
+            ) {
+                if let Err(error) = loaded.save() {
+                    app.notice = Some(error);
+                }
             }
-            ui::chips::Action::Removed(entry) => {
-                loaded.set_intercepts(
-                    intercepts
-                        .into_iter()
-                        .filter(|item| item != &entry)
-                        .collect(),
-                );
-            }
-            ui::chips::Action::None => {}
-        }
+        })
     });
 
     ui.add_space(10.0);
 
-    ui::card(ui, |ui| {
-        ui::section_title(ui, "Never intercept");
-        ui.add_space(6.0);
-        ui.label(
-            egui::RichText::new(
-                "`*.example.com` covers subdomains. These are always tunneled untouched, which \
-                 is what certificate-pinned apps need.",
-            )
-            .size(12.0)
-            .color(ui.visuals().weak_text_color()),
-        );
-        ui.add_space(6.0);
-
-        let exclusions: Vec<String> = loaded.config.exclusions.iter().cloned().collect();
-        match ui::chips::editor(
-            ui,
-            "exclusions",
-            &exclusions,
-            &mut app.exclusions_draft,
-            "*.bank.example",
-            "Nothing excluded — every host follows the interception mode above.",
-            host,
-        ) {
-            ui::chips::Action::Added(entry) => {
-                let mut next = exclusions;
-                next.push(entry);
-                loaded.set_exclusions(next);
-                app.notice = Some(String::from("Never-intercept list saved."));
-            }
-            ui::chips::Action::Removed(entry) => {
-                loaded.set_exclusions(
-                    exclusions
-                        .into_iter()
-                        .filter(|item| item != &entry)
-                        .collect(),
-                );
-            }
-            ui::chips::Action::None => {}
-        }
-    });
+    super::diagnostics::show(app, ui);
 
     ui.add_space(10.0);
 
+    let Some(loaded) = app.loaded.as_ref() else {
+        return;
+    };
     ui::card(ui, |ui| {
         ui::section_title(ui, "Storage");
         ui.add_space(6.0);

@@ -7,6 +7,9 @@
 //!
 //! Only the question name and the A/AAAA answer addresses are parsed. A CNAME chain still maps to
 //! the queried name, which is the name the app connected to and the name the rules match.
+//!
+//! Queries for filtered hosts are answered here with the unspecified address, which stops QUIC and
+//! every other protocol the proxy cannot see, not just the TCP that reaches it.
 
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -16,6 +19,9 @@ use std::time::{Duration, Instant};
 const RECORD_A: u16 = 1;
 const RECORD_AAAA: u16 = 28;
 const HEADER_LEN: usize = 12;
+const CLASS_IN: u16 = 1;
+/// Short, so unblocking a host takes effect within a minute of cached answers.
+const BLOCKED_TTL: u32 = 60;
 /// Longest a name may be once the labels are joined, per RFC 1035.
 const MAX_NAME: usize = 255;
 
@@ -139,6 +145,65 @@ pub fn parse_response(message: &[u8]) -> Option<Answer> {
     }
 
     (!addresses.is_empty()).then_some(Answer { name, addresses })
+}
+
+/// A standard query's first question.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Query {
+    pub name: String,
+    pub kind: u16,
+    question_end: usize,
+}
+
+/// The question of a standard query, or `None` for responses, other opcodes and junk.
+pub fn parse_query(message: &[u8]) -> Option<Query> {
+    if message.len() < HEADER_LEN {
+        return None;
+    }
+    // QR clear, opcode QUERY.
+    if message[2] & 0xf8 != 0 {
+        return None;
+    }
+    if u16::from_be_bytes([message[4], message[5]]) != 1 {
+        return None;
+    }
+    let mut at = HEADER_LEN;
+    let name = read_name(message, &mut at)?;
+    let kind = u16::from_be_bytes([*message.get(at)?, *message.get(at + 1)?]);
+    let class = u16::from_be_bytes([*message.get(at + 2)?, *message.get(at + 3)?]);
+    if name.is_empty() || class != CLASS_IN {
+        return None;
+    }
+    Some(Query {
+        name,
+        kind,
+        question_end: at + 4,
+    })
+}
+
+/// An answer to `message` with the unspecified address for A and AAAA, and no records otherwise.
+pub fn blocked_response(message: &[u8], query: &Query) -> Vec<u8> {
+    let mut response = message[..query.question_end].to_vec();
+    // QR set, recursion desired echoed, recursion available, NOERROR.
+    response[2] = 0x80 | (message[2] & 0x01);
+    response[3] = 0x80;
+    let address: &[u8] = match query.kind {
+        RECORD_A => &[0; 4],
+        RECORD_AAAA => &[0; 16],
+        _ => &[],
+    };
+    response[6..8].copy_from_slice(&u16::from(!address.is_empty()).to_be_bytes());
+    // No authority or additional records; an EDNS option from the query is not echoed.
+    response[8..12].fill(0);
+    if !address.is_empty() {
+        response.extend([0xc0, 0x0c]); // the question name
+        response.extend(query.kind.to_be_bytes());
+        response.extend(CLASS_IN.to_be_bytes());
+        response.extend(BLOCKED_TTL.to_be_bytes());
+        response.extend((address.len() as u16).to_be_bytes());
+        response.extend(address);
+    }
+    response
 }
 
 /// Read a name at `at`, following compression pointers, and leave `at` past the name as written.
@@ -277,6 +342,65 @@ mod tests {
         message.extend([0xc0, 0x0c]);
         message.extend([0, 1, 0, 1]);
         assert_eq!(parse_response(&message), None);
+    }
+
+    fn query(name: &str, kind: u16, edns: bool) -> Vec<u8> {
+        let mut message = vec![0xab, 0xcd, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, u8::from(edns)];
+        encode_name(name, &mut message);
+        message.extend(kind.to_be_bytes());
+        message.extend(1u16.to_be_bytes());
+        if edns {
+            // Root name, OPT, 1232-byte payload, no flags or options.
+            message.extend([0, 0, 41, 0x04, 0xd0, 0, 0, 0, 0, 0, 0]);
+        }
+        message
+    }
+
+    #[test]
+    fn reads_a_query() {
+        let parsed = parse_query(&query("Ads.Example.com", RECORD_A, true)).unwrap();
+        assert_eq!(parsed.name, "ads.example.com");
+        assert_eq!(parsed.kind, RECORD_A);
+    }
+
+    #[test]
+    fn blocked_a_and_aaaa_answers_carry_the_unspecified_address() {
+        for (kind, address) in [
+            (RECORD_A, IpAddr::from([0, 0, 0, 0])),
+            (RECORD_AAAA, IpAddr::from(Ipv6Addr::UNSPECIFIED)),
+        ] {
+            let message = query("ads.example.com", kind, true);
+            let response = blocked_response(&message, &parse_query(&message).unwrap());
+            assert_eq!(&response[..2], &[0xab, 0xcd]);
+            assert_eq!(response[2], 0x81);
+            assert_eq!(response[3] & 0x0f, 0, "NOERROR");
+            assert_eq!(&response[10..12], &[0, 0], "the OPT record is not echoed");
+            let answer = parse_response(&response).unwrap();
+            assert_eq!(answer.name, "ads.example.com");
+            assert_eq!(answer.addresses, vec![address]);
+        }
+    }
+
+    #[test]
+    fn other_record_types_get_an_empty_answer() {
+        // HTTPS records would otherwise hand the app ECH keys and ALPN for a blocked host.
+        let message = query("ads.example.com", 65, false);
+        let response = blocked_response(&message, &parse_query(&message).unwrap());
+        assert_eq!(response.len(), message.len());
+        assert_eq!(&response[6..8], &[0, 0]);
+        assert_eq!(response[3] & 0x0f, 0);
+        assert_eq!(parse_response(&response), None);
+    }
+
+    #[test]
+    fn responses_and_junk_are_not_queries() {
+        let answer = response("example.com", &[(RECORD_A, vec![1, 2, 3, 4])]);
+        assert_eq!(parse_query(&answer), None);
+        assert_eq!(parse_query(b""), None);
+        let message = query("example.com", RECORD_A, false);
+        for cut in 0..message.len() {
+            assert_eq!(parse_query(&message[..cut]), None, "cut at {cut}");
+        }
     }
 
     #[test]

@@ -14,7 +14,9 @@
 //! becomes a `CONNECT`, and the proxy answers it exactly as it answers the browser's, so there is
 //! one place where a host is blocked and one request log that records it.
 
+pub mod apps;
 pub mod dns;
+pub mod quic;
 pub mod sniff;
 
 #[cfg(unix)]
@@ -22,9 +24,11 @@ pub mod relay;
 #[cfg(unix)]
 mod tun;
 
+use crate::proxy::session::Session;
+use apps::AppResolver;
 use dns::DnsMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 /// How long an address keeps the name it was resolved for. Long enough to outlive a page's worth
@@ -32,6 +36,8 @@ use std::time::{Duration, Instant};
 /// the session.
 const DNS_TTL: Duration = Duration::from_secs(10 * 60);
 const DNS_CAPACITY: usize = 4096;
+/// Handed to captured apps; Android and Chrome upgrade well-known resolvers to encrypted DNS.
+pub const VIRTUAL_DNS: std::net::Ipv4Addr = std::net::Ipv4Addr::new(10, 7, 0, 2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VpnStatus {
@@ -57,7 +63,11 @@ pub struct VpnStats {
     pub tcp_flows: AtomicU64,
     pub udp_flows: AtomicU64,
     pub dns_queries: AtomicU64,
+    /// Queries answered here with the unspecified address.
+    pub dns_blocked: AtomicU64,
+    /// QUIC flows dropped, by the blanket setting or by hostname.
     pub quic_dropped: AtomicU64,
+    pub quic_passed: AtomicU64,
     /// Flows the proxy refused (a blocked host) or that never reached it.
     pub refused: AtomicU64,
 }
@@ -67,7 +77,9 @@ pub struct VpnStatsSnapshot {
     pub tcp_flows: u64,
     pub udp_flows: u64,
     pub dns_queries: u64,
+    pub dns_blocked: u64,
     pub quic_dropped: u64,
+    pub quic_passed: u64,
     pub refused: u64,
 }
 
@@ -77,7 +89,9 @@ impl VpnStats {
             tcp_flows: self.tcp_flows.load(Ordering::Relaxed),
             udp_flows: self.udp_flows.load(Ordering::Relaxed),
             dns_queries: self.dns_queries.load(Ordering::Relaxed),
+            dns_blocked: self.dns_blocked.load(Ordering::Relaxed),
             quic_dropped: self.quic_dropped.load(Ordering::Relaxed),
+            quic_passed: self.quic_passed.load(Ordering::Relaxed),
             refused: self.refused.load(Ordering::Relaxed),
         }
     }
@@ -90,7 +104,38 @@ pub struct CaptureSettings {
     pub mtu: u16,
     pub capture_ipv6: bool,
     pub block_quic: bool,
+    pub block_dns: bool,
     pub dns: Vec<String>,
+}
+
+/// The proxy session the relay reports to and takes filtering decisions from.
+#[derive(Default)]
+pub struct ProxyLink(RwLock<Option<Arc<Session>>>);
+
+impl ProxyLink {
+    pub fn set(&self, session: Option<Arc<Session>>) {
+        if let Ok(mut slot) = self.0.write() {
+            *slot = session;
+        }
+    }
+
+    pub fn session(&self) -> Option<Arc<Session>> {
+        self.0.read().ok()?.clone()
+    }
+}
+
+/// The configured resolvers that parse as addresses, or Cloudflare's when none do.
+fn upstream_resolvers(configured: &[String]) -> Vec<std::net::IpAddr> {
+    let parsed: Vec<std::net::IpAddr> = configured
+        .iter()
+        .filter_map(|server| server.trim().parse().ok())
+        .filter(|address| *address != std::net::IpAddr::from(VIRTUAL_DNS))
+        .collect();
+    if parsed.is_empty() {
+        vec![[1, 1, 1, 1].into(), [1, 0, 0, 1].into()]
+    } else {
+        parsed
+    }
 }
 
 fn always_on_message(other: &str) -> String {
@@ -104,6 +149,8 @@ pub struct VpnController {
     status: VpnStatus,
     stats: Arc<VpnStats>,
     dns: Arc<DnsMap>,
+    link: Arc<ProxyLink>,
+    apps: Arc<AppResolver>,
     /// The relay's own runtime, so a proxy restart does not take the tun down with it.
     runtime: Option<tokio::runtime::Runtime>,
     relay_task: Option<tokio::task::JoinHandle<()>>,
@@ -131,6 +178,8 @@ impl VpnController {
             status: VpnStatus::Off,
             stats: Arc::new(VpnStats::default()),
             dns: Arc::new(DnsMap::new(DNS_CAPACITY, DNS_TTL)),
+            link: Arc::new(ProxyLink::default()),
+            apps: Arc::new(AppResolver::new()),
             runtime: None,
             relay_task: None,
             shutdown: None,
@@ -148,6 +197,11 @@ impl VpnController {
 
     pub fn stats(&self) -> VpnStatsSnapshot {
         self.stats.snapshot()
+    }
+
+    /// Where the app points the relay whenever the proxy starts or stops.
+    pub fn link(&self) -> &ProxyLink {
+        &self.link
     }
 
     /// Addresses currently attributable to a hostname from DNS answers.
@@ -317,7 +371,7 @@ impl VpnController {
             prefix: 32,
             address6: settings.capture_ipv6.then(|| String::from("fd00:7::1")),
             prefix6: 128,
-            dns: settings.dns.clone(),
+            dns: vec![VIRTUAL_DNS.to_string()],
             notification_title: String::from("Privaxy"),
             notification_text: format!("Capturing all traffic on port {}", settings.proxy_port),
         };
@@ -360,18 +414,24 @@ impl VpnController {
         // Java detached the descriptor, so the relay owns it: dropping it closes the interface.
         let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        let config = relay::RelayConfig {
-            proxy: (std::net::Ipv4Addr::LOCALHOST, settings.proxy_port).into(),
-            mtu,
-            block_quic: settings.block_quic,
-        };
-
-        let stats = self.stats.clone();
-        let dns = self.dns.clone();
+        let context = Arc::new(relay::Context::new(
+            relay::RelayConfig {
+                proxy: (std::net::Ipv4Addr::LOCALHOST, settings.proxy_port).into(),
+                mtu,
+                block_quic: settings.block_quic,
+                block_dns: settings.block_dns,
+                virtual_dns: VIRTUAL_DNS.into(),
+                upstream_dns: upstream_resolvers(&settings.dns),
+            },
+            self.stats.clone(),
+            self.dns.clone(),
+            self.link.clone(),
+            self.apps.clone(),
+        ));
         self.relay_error = Arc::new(Mutex::new(None));
         let failure = self.relay_error.clone();
         self.relay_task = Some(runtime.spawn(async move {
-            if let Some(reason) = relay::run(owned, config, stats, dns, shutdown_rx).await {
+            if let Some(reason) = relay::run(owned, context, shutdown_rx).await {
                 if let Ok(mut slot) = failure.lock() {
                     *slot = Some(reason);
                 }
@@ -430,6 +490,7 @@ mod startup_tests {
             mtu: 1500,
             capture_ipv6: false,
             block_quic: true,
+            block_dns: true,
             dns: vec![],
         });
         vpn.status = VpnStatus::Starting;
@@ -481,6 +542,7 @@ mod startup_tests {
             mtu: 1500,
             capture_ipv6: false,
             block_quic: true,
+            block_dns: true,
             dns: vec![],
         });
         vpn.starting_at = Some(Instant::now() - Duration::from_secs(16));
@@ -506,9 +568,9 @@ mod startup_tests {
 #[cfg(target_os = "android")]
 mod platform {
     pub use egui_mobile::vpn::{
-        VpnConfig as Config, VpnEvent as Event, blocking_always_on_vpn, open_notification_settings,
-        open_vpn_settings, poll_consent, poll_event, request_consent, start, start_foreground,
-        stop, stop_capture,
+        VpnConfig as Config, VpnEvent as Event, blocking_always_on_vpn, connection_owner,
+        describe_uid, open_notification_settings, open_vpn_settings, poll_consent, poll_event,
+        request_consent, start, start_foreground, stop, stop_capture,
     };
 
     pub const SUPPORTED: bool = true;
@@ -566,6 +628,23 @@ mod platform {
         false
     }
     pub fn blocking_always_on_vpn() -> Option<String> {
+        None
+    }
+
+    pub struct UidOwner {
+        pub package: Option<String>,
+        pub label: Option<String>,
+    }
+
+    pub fn connection_owner(
+        _udp: bool,
+        _local: std::net::SocketAddr,
+        _remote: std::net::SocketAddr,
+    ) -> Option<u32> {
+        None
+    }
+
+    pub fn describe_uid(_uid: u32) -> Option<UidOwner> {
         None
     }
 }

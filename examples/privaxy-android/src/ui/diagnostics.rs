@@ -5,6 +5,8 @@ use egui::{RichText, Ui};
 #[derive(Default)]
 pub struct LogView {
     pub open: bool,
+    /// Scroll the card into view on the next frame.
+    pub reveal: bool,
     query: String,
     paused: bool,
     frozen: Vec<privaxy_diagnostics::Entry>,
@@ -12,6 +14,9 @@ pub struct LogView {
 pub fn show(app: &mut PrivaxyApp, ui: &mut Ui) {
     let export_dir = app.loaded.as_ref().map(|v| v.paths.root.join("exports"));
     let mut export = false;
+    if std::mem::take(&mut app.logs.reveal) {
+        ui.scroll_to_cursor(Some(egui::Align::TOP));
+    }
     ui::card(ui, |ui| {
         ui::section_title(ui, "Diagnostic logs");
         ui.horizontal_wrapped(|ui| {
@@ -29,7 +34,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut Ui) {
             ui.toggle_value(&mut app.logs.open, "View logs");
             export = ui.button("Export logs").clicked();
         });
-        ui.weak("Level and higher severity. Saved across restarts; up to 10 MiB. Trace adds connection stages and heartbeat timing.");
+        ui.weak("Saved across restarts, up to 10 MiB. Trace adds connection stages and heartbeat timing.");
         if let Some(error) = privaxy_diagnostics::file_error() {
             ui.colored_label(ui::BAD, error);
         }
@@ -73,6 +78,8 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut Ui) {
         egui::ScrollArea::vertical()
             .id_salt("diagnostic_entries")
             .max_height(400.0)
+            // Fixed height: deep in the page egui would shrink it to 64pt.
+            .min_scrolled_height(400.0)
             .auto_shrink([false, false])
             .stick_to_bottom(!app.logs.paused)
             .show(ui, |ui| {

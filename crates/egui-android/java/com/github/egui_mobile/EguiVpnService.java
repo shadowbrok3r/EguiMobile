@@ -6,11 +6,17 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
+import android.net.ConnectivityManager;
 import android.net.VpnService;
 import android.os.Build;
 import android.os.ParcelFileDescriptor;
+import android.system.OsConstants;
 import android.util.Log;
+
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
 
 /**
  * VpnService that establishes a tun interface and hands its file descriptor to Rust, and the
@@ -32,6 +38,15 @@ public class EguiVpnService extends VpnService {
 
     /** The fd was detached to Rust, which owns it and closes it on stop. */
     private boolean tunOpen;
+
+    /** The live instance, for the static lookups Rust makes from its relay threads. */
+    private static volatile EguiVpnService running;
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        running = this;
+    }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
@@ -147,7 +162,52 @@ public class EguiVpnService extends VpnService {
     @Override
     public void onDestroy() {
         teardown();
+        if (running == this) {
+            running = null;
+        }
         super.onDestroy();
+    }
+
+    /** The uid owning a captured connection, or -1; only the active VPN app gets an answer. */
+    static int connectionOwnerUid(
+            boolean udp, byte[] localAddress, int localPort, byte[] remoteAddress, int remotePort) {
+        EguiVpnService service = running;
+        if (service == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return -1;
+        }
+        try {
+            ConnectivityManager manager = service.getSystemService(ConnectivityManager.class);
+            return manager.getConnectionOwnerUid(
+                    udp ? OsConstants.IPPROTO_UDP : OsConstants.IPPROTO_TCP,
+                    new InetSocketAddress(InetAddress.getByAddress(localAddress), localPort),
+                    new InetSocketAddress(InetAddress.getByAddress(remoteAddress), remotePort));
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
+    /** The uid's label then its first package, newline separated, or null. */
+    static String describeUid(int uid) {
+        EguiVpnService service = running;
+        if (service == null) {
+            return null;
+        }
+        PackageManager manager = service.getPackageManager();
+        String[] packages = manager.getPackagesForUid(uid);
+        if (packages == null || packages.length == 0) {
+            return manager.getNameForUid(uid);
+        }
+        // A shared uid (android.uid.system and the like) is better named by its shared name.
+        String label = packages.length > 1 ? manager.getNameForUid(uid) : null;
+        if (label == null) {
+            try {
+                label = manager.getApplicationLabel(manager.getApplicationInfo(packages[0], 0))
+                        .toString();
+            } catch (PackageManager.NameNotFoundException e) {
+                label = packages[0];
+            }
+        }
+        return label + "\n" + packages[0];
     }
 
     private boolean goForeground(String title, String text) {

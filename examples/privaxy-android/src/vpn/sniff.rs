@@ -34,8 +34,16 @@ pub fn looks_like_client_hello(data: &[u8]) -> bool {
 /// reading until [`MAX_HELLO`] or its deadline. Hostnames are lowercased, and a trailing root dot
 /// is dropped, so they compare against filter rules the way the proxy's own hosts do.
 pub fn server_name(data: &[u8]) -> Option<String> {
-    let handshake = client_hello(data)?;
-    let mut hello = Reader::new(&handshake[4..]);
+    hello_server_name(&client_hello(data)?)
+}
+
+/// The `server_name` of one ClientHello handshake message, without TLS record framing — the form
+/// QUIC carries it in.
+pub fn hello_server_name(handshake: &[u8]) -> Option<String> {
+    if handshake.first() != Some(&0x01) {
+        return None;
+    }
+    let mut hello = Reader::new(handshake.get(4..)?);
 
     hello.skip(2)?; // client_version
     hello.skip(32)?; // random

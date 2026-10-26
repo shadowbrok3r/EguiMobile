@@ -453,12 +453,12 @@ fn capture_card(loaded: &mut crate::app::Loaded, ui: &mut egui::Ui, host: &Host)
             ui.add_space(10.0);
             ui.columns(2, |columns| {
                 ui::stat(&mut columns[0], "DNS lookups", stats.dns_queries, ui::MUTED);
-                ui::stat(
-                    &mut columns[1],
-                    "QUIC dropped",
-                    stats.quic_dropped,
-                    ui::WARN,
-                );
+                ui::stat(&mut columns[1], "DNS blocked", stats.dns_blocked, ui::BAD);
+            });
+            ui.add_space(10.0);
+            ui.columns(2, |columns| {
+                ui::stat(&mut columns[0], "QUIC dropped", stats.quic_dropped, ui::WARN);
+                ui::stat(&mut columns[1], "QUIC passed", stats.quic_passed, ui::MUTED);
             });
             ui.add_space(6.0);
             ui.label(

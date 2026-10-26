@@ -19,8 +19,9 @@ pub struct TunDevice {
 impl TunDevice {
     pub fn new(fd: OwnedFd) -> io::Result<Self> {
         set_nonblocking(&fd)?;
+        // SAFETY: the OwnedFd keeps the descriptor open until the AsyncFd drops it.
         Ok(Self {
-            fd: AsyncFd::new(fd)?,
+            fd: unsafe { AsyncFd::register(fd) }?,
         })
     }
 }

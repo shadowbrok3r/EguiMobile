@@ -278,7 +278,7 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                     egui::TextEdit::singleline(&mut app.request_query)
                         .font(egui::FontId::proportional(12.0))
                         .margin(egui::Margin::symmetric(6, 4))
-                        .hint_text("Host, path, header"),
+                        .hint_text("Host, path, header, app"),
                 );
                 let filter = ui::icons::button(
                     ui,
@@ -291,7 +291,10 @@ pub fn show(app: &mut PrivaxyApp, ui: &mut egui::Ui, host: &Host) {
                     app.request_filters.show_filters = !app.request_filters.show_filters;
                 }
                 let mut open = app.request_filters.show_filters;
+                // Anchored to the whole toolbar: beside the button the panel fits nowhere on screen.
                 egui::Popup::from_response(&filter)
+                    .anchor(ui.max_rect())
+                    .align(egui::RectAlign::BOTTOM_START)
                     .open_bool(&mut open)
                     .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                     .frame(egui::Frame::popup(ui.style()).fill(egui::Color32::from_rgb(25, 12, 33)))
@@ -617,7 +620,7 @@ fn filter_panel(filters: &mut RequestFilters, ui: &mut egui::Ui) {
                 .color(ui.visuals().weak_text_color()),
         );
         ui.horizontal_wrapped(|ui| {
-            for option in ["", "GET", "POST", "CONNECT", "PUT", "DELETE"] {
+            for option in ["", "GET", "POST", "CONNECT", "QUIC", "DNS", "PUT", "DELETE"] {
                 let label = if option.is_empty() { "Any" } else { option };
                 if ui
                     .selectable_label(filters.method == option, label)
@@ -657,7 +660,7 @@ fn filter_panel(filters: &mut RequestFilters, ui: &mut egui::Ui) {
     });
 }
 
-/// Reads each event's exchange once, applying the search across URL, headers and status.
+/// Reads each event's exchange once, applying the search across URL, headers, app and rule.
 fn collect(events: Vec<RequestEvent>, query: &str, filters: &RequestFilters) -> Vec<Row> {
     events
         .into_iter()
@@ -707,7 +710,12 @@ fn collect(events: Vec<RequestEvent>, query: &str, filters: &RequestFilters) -> 
             if !filters.status.accepts(status) {
                 return None;
             }
-            if !query.is_empty() && !event.url.to_lowercase().contains(query) && !matches_headers {
+            if !query.is_empty()
+                && !event.url.to_lowercase().contains(query)
+                && !matches_headers
+                && !event.app().is_some_and(|app| app.matches(query))
+                && !matches!(&event.kind, EventKind::Blocked { rule } if rule.to_string().to_lowercase().contains(query))
+            {
                 return None;
             }
 
@@ -767,6 +775,13 @@ fn row_card(row: &Row, blocked: bool, ui: &mut egui::Ui) -> RowAction {
                     .size(10.0)
                     .color(ui.visuals().weak_text_color()),
             );
+            if let Some(app) = row.event.app() {
+                ui.label(
+                    egui::RichText::new(ui::elide(&app.name(), 28))
+                        .size(10.0)
+                        .strong(),
+                );
+            }
             if let Some(status) = row.status {
                 ui.label(
                     egui::RichText::new(status.to_string())
@@ -802,13 +817,20 @@ fn row_card(row: &Row, blocked: bool, ui: &mut egui::Ui) -> RowAction {
                 .color(ui.visuals().weak_text_color()),
         );
 
-        if let EventKind::Blocked { filter } = &row.event.kind {
+        if let EventKind::Blocked { rule } = &row.event.kind {
             ui.label(
-                egui::RichText::new(ui::elide(filter, 60))
+                egui::RichText::new(ui::elide(&rule.text, 60))
                     .size(10.0)
                     .monospace()
                     .color(ui::WARN),
             );
+            if let Some(location) = rule.location() {
+                ui.label(
+                    egui::RichText::new(ui::elide(&location, 60))
+                        .size(10.0)
+                        .color(ui.visuals().weak_text_color()),
+                );
+            }
         }
 
         if let Some(error) = &row.error {
@@ -887,6 +909,7 @@ mod tests {
             method: "GET".into(),
             url: format!("https://{}.example.com/item/{n}", n % 3),
             kind: EventKind::Proxied,
+            origin: None,
             exchange: Arc::new(Mutex::new(Exchange::for_test())),
         }
     }

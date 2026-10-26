@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.6.1 — 2026-10-26
+
+- Move navigation from the scrolling top strip to an icon-only bottom bar that hides while typing, and make the Privaxy title a button back to the Dashboard.
+- Put the proxy settings first in Settings, move theme and diagnostic logs to the bottom, and shorten the explanations.
+- Keep each screen's scroll position when switching tabs.
+
+## v0.6.0 — 2026-10-24
+
+- Name the app behind every captured connection (Android 10+), on rows, in the inspector, in search and as `_app` in HAR exports.
+- With Drop QUIC off, name QUIC flows from their handshake, log them and block them per host instead of passing them unfiltered.
+- Block filtered hosts at DNS: their lookups get 0.0.0.0, which stops QUIC and other UDP too. On by default; inspected hosts are left to URL rules.
+- Show the list and line of the rule behind every block.
+- Update the filter engine to adblock 0.13: about 6x less memory with the default lists, faster list rebuilds and matching, and `$method=` rules.
+- Stream HTML pages as they arrive instead of buffering them for cosmetic filtering; pages over 8 MiB get hiding rules from their first 8 MiB.
+- Show the dialled address and how the hostname was found in the inspector.
+- Open the request filter panel fully on screen, and stop the scrolling tab bar from tripping the overflow guard.
+- Resolve captured apps through a resolver inside the VPN. Android's automatic Private DNS and Chrome's secure DNS had been moving lookups to encrypted DNS, which left hostnames unattributed and DNS blocking blind.
+
 ## v0.5.12 — 2026-10-24
 
 - Keep scroll handles visible with a wider, contrasting track in requests and inspection.

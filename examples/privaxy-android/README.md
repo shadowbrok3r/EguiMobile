@@ -20,8 +20,9 @@ the address of an already paired desktop while keeping its certificate and token
 Android Back, or tapping outside keeps the pairing; only **Forget pairing** removes
 it and disables desktop routing.
 
-The top bar contains navigation and a live connection indicator. **Connected · paired**
-means pinned TLS authentication and a heartbeat succeeded. **Unreachable · pairing saved**
+The icon bar at the bottom switches screens and hides while the keyboard is up; tapping
+**Privaxy** in the top bar also returns to the Dashboard. The top bar holds a live connection
+indicator. **Connected · paired** means pinned TLS authentication and a heartbeat succeeded. **Unreachable · pairing saved**
 means the credentials are remembered but the desktop is not responding; the reason
 appears on Pairing and retries are automatic. **Check connection** retries immediately
 without forgetting the pairing. Connection errors include the saved IP and relay port,
@@ -81,7 +82,7 @@ the failure, then export both logs. UTC timestamps allow the two sides to be ali
 | `~/.privaxy` via `dirs::home_dir` | app private files directory | Android has no home directory, and this is the only location writable without a storage permission. |
 | `reqwest` default TLS | `rustls-no-provider` + `webpki-roots` | reqwest's `rustls` feature forces rustls-platform-verifier, which needs Android Java helper classes this APK does not bundle and panics uninitialized. |
 | Engine on a thread behind a crossbeam channel | `RwLock<Engine>` | Matching only needs `&self`, so requests match concurrently and the HTML rewriter no longer has to `block_on` a channel round trip from inside a sync callback. |
-| Whole response buffered in memory | streamed, with bounded HTML rewriting | HTML is buffered up to 8 MiB; larger documents stream unchanged. Unsupported content encodings are preserved and never rewritten. |
+| Whole response buffered in memory | streamed, HTML included | HTML is forwarded as it arrives while a copy of its first 8 MiB is read for ids and classes; the hiding stylesheet follows the document. A parser failure only ends collection. Unsupported content encodings are preserved and never rewritten. |
 | Filter lists from `filters.privaxy.net` | upstream URLs directly | No single point of failure outside the user's control. Adds AdGuard Mobile Ads, which desktop lists largely miss. |
 | Web UI on a second port | egui, in-process | — |
 
@@ -105,7 +106,9 @@ shows connection metadata only.
 
 Installing the certificate does **not** turn inspection on. Apps targeting Android 7+ do not trust
 user-installed CAs by default; individual apps can opt in or use their own trust store. Certificate
-pinning is another independent restriction. Full inspection is therefore opt-in, and hosts whose
+pinning is another independent restriction. Chrome opts in; Google's own apps (Play Services,
+Search, YouTube, Gmail, Play Store) do not, and several pin, so their connections fail under
+inspection with the CA installed. The app label on each row makes those failures easy to spot. Full inspection is therefore opt-in, and hosts whose
 apps reject the CA go in **Never intercept**. See [Android's trust configuration](https://developer.android.com/privacy-and-security/security-config)
 and [certificate pinning](https://docs.mitmproxy.org/stable/concepts/certificates/#certificate-pinning).
 
@@ -134,7 +137,9 @@ keep **Drop QUIC** enabled for cached alternatives and clients that try HTTP/3 d
 | TLS / CONNECT | The TLS connection itself. Individual HTTP requests appear in separate rows; use **With details** or the **Inspectable** filter. |
 | FAILED | Open Overview for the actual failure. Certificate alerts, protocol negotiation, resets, upstream errors and timeouts are distinguished. |
 | Body details | Full request and response bodies are stored privately on disk. Page through them or use **Save body** / HAR export. An incomplete body has a specific storage or transport error. |
-| No entry | Confirm capture is active, IPv6 is captured and **Drop QUIC** is enabled. UDP traffic is not HTTP-inspected; clients without TCP fallback may stop working if QUIC is dropped. |
+| QUIC | A QUIC (HTTP/3) flow, shown only while **Drop QUIC** is off. Named from its handshake and blocked per host, but its requests are unreadable. Turn Drop QUIC on to move apps onto TCP. |
+| DNS | A lookup answered with 0.0.0.0 because its host is filtered. Repeats within a minute are not logged again. |
+| No entry | Confirm capture is active and IPv6 is captured. Apps with their own encrypted DNS, Private DNS set to a hostname, and work-profile apps are outside what the VPN sees by name or at all. |
 
 Start with **Dashboard → Open HTTPS browser test** after adding `example.com` to **Inspect these
 hosts**, then look for its GET row and client/origin protocols. That verifies capture and trust for
@@ -174,10 +179,21 @@ it the same way it answers the browser's, and there is still one request log.
 order:
 
 1. the TLS ClientHello's SNI, sniffed off connections to 443 or 8443, including hellos fragmented
-   across TCP reads and TLS records (bounded to 64 KiB);
+   across TCP reads and TLS records (bounded to 64 KiB), or off a QUIC flow's Initial packets;
 2. otherwise, the DNS reverse map — every answer forwarded through the tun records which addresses
    a name resolved to;
 3. otherwise the address itself, which still matches IP-literal rules.
+
+The inspector's **Host from** row says which of the three named a connection. Encrypted
+ClientHello hides the real name behind a public one (often `cloudflare-ech.com`), and nothing here
+can recover it.
+
+**Naming the app.** On Android 10 and later, `ConnectivityManager.getConnectionOwnerUid` tells the
+VPN's owner which uid opened each captured connection; `QUERY_ALL_PACKAGES` turns that uid into a
+label and package. The relay registers each connection's app and dialled address against the
+loopback port it connects from before it dials the proxy, so every CONNECT, inspected request,
+QUIC and DNS row carries it. The label is on the row, in the inspector and in search, and HAR
+exports it as `_app`. Desktop routing does not pass it on to the desktop log.
 
 **Per protocol.**
 
@@ -185,8 +201,8 @@ order:
 | --- | --- |
 | TCP port 80 | Relayed byte for byte. The proxy reads origin-form requests and takes the authority from `Host`, so plain HTTP is filtered by full URL, not just by host. |
 | TCP anything else | `CONNECT host:port`, then the bytes. A refusal (blocked host) closes the flow, which the app sees as a reset connection. |
-| UDP 53 | Forwarded, and the answers read into the reverse map on the way past. |
-| UDP 443 | Dropped by default, so QUIC apps fall back to TCP where the proxy can see them. An HTTP proxy carries no datagrams, so the alternative is passing QUIC unfiltered. |
+| UDP 53 | Forwarded, and the answers read into the reverse map on the way past. Captured apps are handed `10.7.0.2` as their resolver, which the relay serves from **Upstream resolvers** in turn; every other port on it is refused. Handing out 1.1.1.1 directly let Android validate opportunistic DNS over TLS to it through the tunnel (`ValidatedPrivateDnsAddresses` in `dumpsys connectivity`) and Chrome upgrade it to DNS over HTTPS, after which no lookup crossed UDP 53. With **Block filtered hosts at DNS** (default), a query for a host the filters block is answered here with 0.0.0.0 or ::, and an empty answer for other record types, so QUIC and other UDP to it fail too. Hosts selected for inspection are left to URL rules, and desktop routing leaves filtering to the desktop. |
+| UDP 443 | Dropped by default, so QUIC apps fall back to TCP where the proxy can see them. With **Drop QUIC** off, the first datagrams are held up to half a second while the ClientHello is decrypted from the Initial packets (their keys derive from the connection ID, RFC 9001 §5.2), then the flow is logged as a QUIC row and dropped or passed by hostname. |
 | Other UDP | Forwarded directly. |
 | ICMP and the rest | Dropped. |
 
@@ -286,8 +302,11 @@ old and replacement activities borrow the same backend without creating a second
 
 Run `cargo test -p privaxy_android --lib` from the EguiMobile workspace. Local TLS fixtures verify
 HTTP/2 on both sides, request/response trailers, HTTP/1.1 compatibility, empty responses, preserved
-unknown content encodings, and bounded HTML streaming without waiting for EOF. Additional checks
-cover fragmented ClientHello parsing, body retention and failure classification.
+unknown content encodings, and HTML streaming without waiting for EOF. Additional checks cover
+fragmented ClientHello parsing, body retention and failure classification. QUIC parsing is checked
+against the RFC 9001 and RFC 9369 sample Initials and against split, reordered and tampered
+packets sealed with the client keys; a fake tun carries a filtered DNS query and a QUIC Initial
+through ipstack end to end.
 
 After ARTEMIS exploration, `tests/android_lifecycle.py` exercises repeated Home/resume and
 Activity replacement while sending continuous proxy traffic. It requires ADB, Tesseract with
@@ -326,7 +345,8 @@ Three routes to the same rule:
 - **Filters → Custom rules** for Adblock Plus syntax directly.
 
 All of them add `||host^` — the domain anchor, which matches the host and every subdomain and is
-the form the CONNECT-time check is built around, so it blocks in both interception modes. Adding a
+the form the CONNECT-time check is built around, so it blocks in both interception modes. A blocked
+row names its rule and the list and line it came from. Adding a
 rule rebuilds the engine from the on-disk cache; no list is re-downloaded.
 
 Every one of them undoes: tapping the block icon on a blocked row unblocks it, and a rule in
@@ -402,6 +422,5 @@ The Java half and the JNI bridge are shared, in `crates/egui-android`:
 - **uBlock scriptlet and redirect resources.** Cosmetic *hiding* works; `##+js(...)` scriptlets and
   `$redirect=` rules need uBlock's `web_accessible_resources` embedded (~316K), plus adblock's
   `resource-assembler` feature.
-- **DNS-level blocking.** The reverse map is read-only: answers are observed, never rewritten. It
-  would block QUIC and other datagram traffic without dropping it, at the cost of putting blocking
-  policy in a second place.
+- **App names in the desktop log.** The pairing relay carries the stream, not the app that
+  opened it.

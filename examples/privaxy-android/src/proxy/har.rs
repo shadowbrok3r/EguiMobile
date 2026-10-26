@@ -41,6 +41,9 @@ pub struct Entry {
     pub timings: Timings,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// The Android app that opened the connection, when the VPN captured it.
+    #[serde(rename = "_app", skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -185,7 +188,7 @@ fn entry(event: &RequestEvent) -> io::Result<Entry> {
         error.clone()
     } else {
         match &event.kind {
-            EventKind::Blocked { filter } => format!("Blocked by Privaxy ({filter})"),
+            EventKind::Blocked { rule } => format!("Blocked by Privaxy: {rule}"),
             EventKind::Tunneled if status == 0 => String::from("Tunneled, not inspected"),
             EventKind::Intercepted if status == 0 => {
                 String::from("TLS connection opened; requests inside are separate entries")
@@ -282,6 +285,7 @@ fn entry(event: &RequestEvent) -> io::Result<Entry> {
             .collect();
             (!notes.is_empty()).then(|| notes.join(" "))
         },
+        app: event.app().map(|app| app.describe()),
     })
 }
 
@@ -585,7 +589,7 @@ mod tests {
             "CONNECT",
             "https://ads.example.com/",
             EventKind::Blocked {
-                filter: String::from("||ads.example.com^"),
+                rule: crate::proxy::blocker::BlockRule::new("||ads.example.com^"),
             },
         ));
 

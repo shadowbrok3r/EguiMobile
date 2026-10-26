@@ -8,13 +8,17 @@
 //! Java calls back into three natives on the service class. `FindClass` cannot see app classes
 //! from the render thread, so [`register_natives`] resolves it through the activity's ClassLoader
 //! (the `getObjectClass` trick used for the IME bridge needs an instance, and there is none here).
+//! It also keeps that class, so [`connection_owner`] and [`describe_uid`] work from any thread,
+//! with or without an Activity.
 
 use std::collections::VecDeque;
+use std::net::{IpAddr, SocketAddr};
 use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use jni::objects::{JObject, JString, JValue};
+use jni::JavaVM;
+use jni::objects::{GlobalRef, JObject, JString, JValue};
 
 use crate::host::with_native_activity;
 
@@ -28,6 +32,8 @@ const REQUEST_VPN_CONSENT: i32 = 0x5670;
 static EVENTS: Mutex<VecDeque<VpnEvent>> = Mutex::new(VecDeque::new());
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static REGISTERED: OnceLock<bool> = OnceLock::new();
+/// The service class, for static calls from threads the Activity's ClassLoader cannot reach.
+static SERVICE_CLASS_REF: OnceLock<(JavaVM, GlobalRef)> = OnceLock::new();
 /// Set while a consent dialog is outstanding, so a poll can tell "waiting" from "never asked".
 static AWAITING_CONSENT: AtomicBool = AtomicBool::new(false);
 
@@ -302,6 +308,86 @@ fn app_label(env: &mut jni::JNIEnv, activity: &JObject, package: &str) -> Option
     env.get_string(&JString::from(label)).ok().map(Into::into)
 }
 
+/// What Android says about a uid: its label and first package.
+#[derive(Debug, Clone, Default)]
+pub struct UidOwner {
+    pub package: Option<String>,
+    pub label: Option<String>,
+}
+
+/// The uid owning a captured connection; only the active VPN app gets an answer, from API 29.
+pub fn connection_owner(udp: bool, local: SocketAddr, remote: SocketAddr) -> Option<u32> {
+    with_service_class(|env, class| {
+        let local_address = env.byte_array_from_slice(&address_bytes(local.ip()))?;
+        let remote_address = env.byte_array_from_slice(&address_bytes(remote.ip()))?;
+        let uid = env
+            .call_static_method(
+                class,
+                "connectionOwnerUid",
+                "(Z[BI[BI)I",
+                &[
+                    JValue::Bool(u8::from(udp)),
+                    JValue::Object(&local_address),
+                    JValue::Int(i32::from(local.port())),
+                    JValue::Object(&remote_address),
+                    JValue::Int(i32::from(remote.port())),
+                ],
+            )?
+            .i()?;
+        Ok(u32::try_from(uid).ok())
+    })
+    .flatten()
+}
+
+/// A uid's label and package, as the running VPN service's PackageManager sees them.
+pub fn describe_uid(uid: u32) -> Option<UidOwner> {
+    with_service_class(|env, class| {
+        let text = env
+            .call_static_method(
+                class,
+                "describeUid",
+                "(I)Ljava/lang/String;",
+                &[JValue::Int(uid as i32)],
+            )?
+            .l()?;
+        if text.is_null() {
+            return Ok(None);
+        }
+        let text: String = env.get_string(&JString::from(text))?.into();
+        let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+        Ok(Some(UidOwner {
+            label: lines.next().map(str::to_owned),
+            package: lines.next().map(str::to_owned),
+        }))
+    })
+    .flatten()
+}
+
+fn address_bytes(address: IpAddr) -> Vec<u8> {
+    match address {
+        IpAddr::V4(v4) => v4.octets().to_vec(),
+        IpAddr::V6(v6) => v6.octets().to_vec(),
+    }
+}
+
+/// Runs `f` against the cached service class on the current thread, attaching it if needed.
+fn with_service_class<R>(
+    f: impl FnOnce(&mut jni::JNIEnv, &GlobalRef) -> jni::errors::Result<R>,
+) -> Option<R> {
+    let (vm, class) = SERVICE_CLASS_REF.get()?;
+    let mut env = vm.attach_current_thread().ok()?;
+    match env.with_local_frame::<_, R, jni::errors::Error>(8, |env| f(env, class)) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_clear();
+            }
+            log::debug!("egui-android vpn lookup failed: {error:?}");
+            None
+        }
+    }
+}
+
 /// Open Android's VPN settings — where the app appears once consent is granted, and the only
 /// place it can be revoked or made always-on.
 pub fn open_vpn_settings() -> bool {
@@ -463,6 +549,9 @@ fn register_natives() -> bool {
             },
         ];
         env.register_native_methods(&class, &methods)?;
+        if SERVICE_CLASS_REF.get().is_none() {
+            let _ = SERVICE_CLASS_REF.set((env.get_java_vm()?, env.new_global_ref(&class)?));
+        }
         Ok(true)
     })
     .unwrap_or(false);

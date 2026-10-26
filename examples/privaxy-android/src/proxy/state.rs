@@ -3,9 +3,11 @@
 //! The UI reads this every frame, so nothing here may block for long: counters are atomics and the
 //! request log contains bounded metadata behind a short-lived lock; payloads live in files.
 
+pub use crate::proxy::blocker::BlockRule;
 use crate::proxy::config::MitmMode;
 use chrono::{DateTime, Local};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -38,13 +40,81 @@ pub enum FiltersStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventKind {
     Blocked {
-        filter: String,
+        rule: BlockRule,
     },
     /// Passed through byte for byte: hostname-only mode, or a never-intercept host.
     Tunneled,
     /// TLS interception was attempted; consult the exchange for its outcome.
     Intercepted,
     Proxied,
+}
+
+/// The Android app behind a captured connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct App {
+    pub uid: u32,
+    pub package: Option<String>,
+    pub label: Option<String>,
+}
+
+impl App {
+    /// Label, else package, else the bare uid.
+    pub fn name(&self) -> String {
+        self.label
+            .clone()
+            .or_else(|| self.package.clone())
+            .unwrap_or_else(|| format!("uid {}", self.uid))
+    }
+
+    /// "Chrome (com.android.chrome)", or just the name when that is all there is.
+    pub fn describe(&self) -> String {
+        match (&self.label, &self.package) {
+            (Some(label), Some(package)) if label != package => format!("{label} ({package})"),
+            _ => self.name(),
+        }
+    }
+
+    pub fn matches(&self, query: &str) -> bool {
+        [&self.label, &self.package]
+            .into_iter()
+            .flatten()
+            .any(|text| text.to_lowercase().contains(query))
+    }
+}
+
+/// Where the relay found the host it put in the URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamedBy {
+    /// The TLS or QUIC ClientHello's server name.
+    Handshake,
+    /// An earlier DNS answer for the destination address.
+    Dns,
+    /// The request's own Host header.
+    Host,
+    /// Nothing; the URL carries the bare address.
+    Address,
+    /// The DNS question itself.
+    Query,
+}
+
+impl NamedBy {
+    pub fn label(self) -> &'static str {
+        match self {
+            NamedBy::Handshake => "TLS/QUIC server name",
+            NamedBy::Dns => "Earlier DNS answer",
+            NamedBy::Host => "Host header",
+            NamedBy::Address => "None (address only)",
+            NamedBy::Query => "DNS question",
+        }
+    }
+}
+
+/// What the VPN knew about a connection before the proxy saw it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Origin {
+    pub app: Option<Arc<App>>,
+    pub destination: SocketAddr,
+    pub named_by: NamedBy,
 }
 
 /// Everything the proxy saw of one exchange, filled in as it happens rather than at the end, so
@@ -105,6 +175,8 @@ pub struct RequestEvent {
     pub method: String,
     pub url: String,
     pub kind: EventKind,
+    /// Set for traffic the VPN captured.
+    pub origin: Option<Arc<Origin>>,
     /// Shared with the request handler, which keeps writing into it while the body streams.
     pub exchange: Arc<Mutex<Exchange>>,
 }
@@ -145,6 +217,15 @@ impl RequestEvent {
             return host.to_owned();
         }
         labels[labels.len() - 2..].join(".")
+    }
+
+    pub fn with_origin(mut self, origin: Option<Arc<Origin>>) -> Self {
+        self.origin = origin;
+        self
+    }
+
+    pub fn app(&self) -> Option<&App> {
+        self.origin.as_ref()?.app.as_deref()
     }
 
     pub fn note(self, note: impl Into<String>) -> Self {
@@ -190,6 +271,8 @@ pub struct ProxyState {
     mode: AtomicU8,
     paused: AtomicBool,
     storage: Mutex<BodyStore>,
+    /// Registered by the VPN relay per loopback connection, keyed by its local port.
+    origins: Mutex<HashMap<u16, Arc<Origin>>>,
     pub counters: Counters,
 }
 
@@ -227,6 +310,7 @@ impl ProxyState {
             storage: Mutex::new(storage),
             next_id: AtomicU64::new(1),
             mode: AtomicU8::new(mode as u8),
+            origins: Mutex::new(HashMap::new()),
             counters: Counters::default(),
         }
     }
@@ -319,6 +403,17 @@ impl ProxyState {
         exchange
     }
 
+    /// The relay calls this before connecting from `port`, so the entry exists when accepted.
+    pub fn expect_origin(&self, port: u16, origin: Arc<Origin>) {
+        if let Ok(mut origins) = self.origins.lock() {
+            origins.insert(port, origin);
+        }
+    }
+
+    pub fn take_origin(&self, port: u16) -> Option<Arc<Origin>> {
+        self.origins.lock().ok()?.remove(&port)
+    }
+
     pub fn latest_id(&self) -> u64 {
         self.next_id.load(Ordering::Relaxed).saturating_sub(1)
     }
@@ -385,6 +480,7 @@ impl RequestEvent {
             method: method.into(),
             url: url.into(),
             kind,
+            origin: None,
             exchange: Arc::new(Mutex::new(Exchange::default())),
         }
     }
