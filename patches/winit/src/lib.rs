@@ -209,6 +209,11 @@ pub mod event;
 pub mod event_loop;
 mod icon;
 pub mod keyboard;
+// Android's modifier translation is platform-independent; run its regression
+// fixtures on host CI too, without requiring an NDK/device for these checks.
+#[cfg(all(test, not(android_platform)))]
+#[path = "platform_impl/android/keyboard_modifiers.rs"]
+mod android_modifiers_tests;
 pub mod monitor;
 mod platform_impl;
 mod utils;

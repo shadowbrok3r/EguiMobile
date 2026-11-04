@@ -26,6 +26,7 @@ use crate::window::{
 };
 
 mod keycodes;
+mod keyboard_modifiers;
 
 pub(crate) use crate::cursor::{
     NoCustomCursor as PlatformCustomCursor, NoCustomCursor as PlatformCustomCursorSource,
@@ -143,6 +144,7 @@ pub struct EventLoop<T: 'static> {
     cause: StartCause,
     ignore_volume_keys: bool,
     combining_accent: Option<char>,
+    modifiers: keyboard_modifiers::AndroidModifiers,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -192,6 +194,7 @@ impl<T: 'static> EventLoop<T> {
             cause: StartCause::Init,
             ignore_volume_keys: attributes.ignore_volume_keys,
             combining_accent: None,
+            modifiers: Default::default(),
         })
     }
 
@@ -215,6 +218,7 @@ impl<T: 'static> EventLoop<T> {
                     callback(event::Event::Resumed, self.window_target());
                 },
                 MainEvent::TerminateWindow { .. } => {
+                    self.update_modifiers(0, callback);
                     callback(event::Event::Suspended, self.window_target());
                 },
                 MainEvent::WindowResized { .. } => resized = true,
@@ -234,6 +238,8 @@ impl<T: 'static> EventLoop<T> {
                 },
                 MainEvent::LostFocus => {
                     HAS_FOCUS.store(false, Ordering::Relaxed);
+                    self.update_modifiers(0, callback);
+                    self.combining_accent = None;
                     callback(
                         event::Event::WindowEvent {
                             window_id: window::WindowId(WindowId),
@@ -281,6 +287,8 @@ impl<T: 'static> EventLoop<T> {
                 MainEvent::Pause => {
                     debug!("App Paused - stopped running");
                     self.running = false;
+                    self.update_modifiers(0, callback);
+                    self.combining_accent = None;
                 },
                 MainEvent::Stop => {
                     // XXX: how to forward this state to applications?
@@ -366,6 +374,21 @@ impl<T: 'static> EventLoop<T> {
         self.pending_redraw = pending_redraw;
     }
 
+    fn update_modifiers<F>(&mut self, meta: u32, callback: &mut F)
+    where
+        F: FnMut(event::Event<T>, &RootAEL),
+    {
+        if let Some(modifiers) = self.modifiers.update(meta) {
+            callback(
+                event::Event::WindowEvent {
+                    window_id: window::WindowId(WindowId),
+                    event: event::WindowEvent::ModifiersChanged(modifiers.into()),
+                },
+                self.window_target(),
+            );
+        }
+    }
+
     fn handle_input_event<F>(
         &mut self,
         android_app: &AndroidApp,
@@ -378,6 +401,9 @@ impl<T: 'static> EventLoop<T> {
         let mut input_status = InputStatus::Handled;
         match event {
             InputEvent::MotionEvent(motion_event) => {
+                if self.running && HAS_FOCUS.load(Ordering::Relaxed) {
+                    self.update_modifiers(motion_event.meta_state().0, callback);
+                }
                 let window_id = window::WindowId(WindowId);
                 let device_id = event::DeviceId(DeviceId(motion_event.device_id()));
 
@@ -427,6 +453,13 @@ impl<T: 'static> EventLoop<T> {
                 }
             },
             InputEvent::KeyEvent(key) => {
+                if !self.running || !HAS_FOCUS.load(Ordering::Relaxed) {
+                    return InputStatus::Unhandled;
+                }
+                // egui/winit integrations consume ModifiersChanged separately
+                // from KeyboardInput. Deliver the native snapshot first so the
+                // same Ctrl+K/Shift+key event already has its correct modifiers.
+                self.update_modifiers(key.meta_state().0, callback);
                 match key.key_code() {
                     // Flag keys related to volume as unhandled. While winit does not have a way for
                     // applications to configure what keys to flag as handled,
@@ -441,7 +474,7 @@ impl<T: 'static> EventLoop<T> {
                         let state = match key.action() {
                             KeyAction::Down => event::ElementState::Pressed,
                             KeyAction::Up => event::ElementState::Released,
-                            _ => event::ElementState::Released,
+                            _ => return InputStatus::Unhandled,
                         };
 
                         let key_char = keycodes::character_map_and_combine_key(
@@ -466,7 +499,8 @@ impl<T: 'static> EventLoop<T> {
                                     physical_key: keycodes::to_physical_key(keycode),
                                     logical_key,
                                     location: keycodes::to_location(keycode),
-                                    repeat: key.repeat_count() > 0,
+                                    repeat: state == event::ElementState::Pressed
+                                        && key.repeat_count() > 0,
                                     text,
                                     platform_specific: KeyEventExtra {},
                                 },
