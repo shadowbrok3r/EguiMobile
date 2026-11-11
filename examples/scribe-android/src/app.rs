@@ -73,6 +73,8 @@ pub struct ScribeApp {
     pub packs_stale: bool,
     packs_checked: Instant,
     pub confirm: Option<Confirm>,
+    /// The menu open on the note's bar, if one is.
+    pub menu: Option<ui::notes::Menu>,
     toast: Option<(String, Instant)>,
     /// Since when the microphone permission dialog has been up.
     pub awaiting_mic: Option<Instant>,
@@ -111,6 +113,7 @@ impl ScribeApp {
             packs_stale: true,
             packs_checked: Instant::now(),
             confirm: None,
+            menu: None,
             toast: None,
             awaiting_mic: None,
             mic_denied: false,
@@ -186,6 +189,7 @@ impl ScribeApp {
             detail.flush(engine);
         }
         self.player.close();
+        self.menu = None;
     }
 
     /// Ask for the microphone if need be, then start.
@@ -468,8 +472,10 @@ impl ScribeApp {
             return;
         }
         let insets = host.safe_area_insets();
+        // Clear of an open note's bar too: Copy is on it, and its toast would cover the player.
+        let bar = if self.tab == Tab::Notes && self.detail.is_some() { ui::notes::BAR } else { 0.0 };
         egui::Area::new(egui::Id::unique("toast"))
-            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -(insets.bottom + ui::TOUCH_HEIGHT + 24.0)))
+            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -(insets.bottom + ui::TOUCH_HEIGHT + 24.0 + bar)))
             .order(egui::Order::Tooltip)
             .interactable(false)
             .show(ctx, |ui| {
@@ -506,6 +512,10 @@ impl ScribeApp {
             }
         }
 
+        // As the frame began: a menu takes Back's key itself and is closed by the time the
+        // press is looked at below, where it would then go on to close the note as well.
+        let menu_open = self.menu.is_some();
+
         egui::Panel::top("header").frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 4))).show(ui, |ui| self.header(ui, host));
 
         // Hidden while typing: focus leads the keyboard in and its inset trails it out.
@@ -514,6 +524,12 @@ impl ScribeApp {
             .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 4)))
             .drag_to_open(false)
             .show_collapsible(ui, &mut tabs_open, |ui| self.tab_bar(ui, host));
+
+        // An open note's player and menus ride on the tab bar, and stay when the keyboard
+        // takes that away: they are the one part of a note that is always in reach.
+        if self.tab == Tab::Notes && self.detail.is_some() && self.engine.is_some() {
+            egui::Panel::bottom("note bar").frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 6))).show(ui, |ui| ui::notes::bar(self, ui, host));
+        }
 
         egui::CentralPanel::default().frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 6))).show(ui, |ui| {
             if let Some(error) = self.init_error.clone() {
@@ -552,6 +568,8 @@ impl ScribeApp {
         if ui::back_pressed(ui.ctx()) {
             if self.confirm.is_some() {
                 self.confirm = None;
+            } else if menu_open {
+                self.menu = None;
             } else if self.detail.is_some() {
                 self.close_note();
             } else if self.tab != Tab::Notes {
@@ -862,6 +880,110 @@ mod tests {
         app.tab = Tab::Settings;
         lays_out(&mut app, &ctx, "settings with speakers on");
         assert_eq!(app.chip().0, "• Simulated");
+    }
+
+    /// A finished note made long: `parts` segments, three voices taking turns in them.
+    fn long_note(engine: &Engine, parts: usize) -> String {
+        record(engine, 6);
+        engine.stop_recording();
+        engine.finalize_recording();
+        settle(engine);
+        let id = engine.library.list()[0].id.clone();
+        engine.edit_note(&id, |note| {
+            let part = |i: usize| Seg { start: i as f32 * 4.0, end: i as f32 * 4.0 + 3.5, text: format!("Part {i} of a long conversation, with enough words in it to wrap on a phone."), speaker: Some((i / 3 % 3) as u8) };
+            note.segments = (0..parts).map(part).collect();
+            note.speakers = Some(crate::library::Speakers { count: 3, fixed: false, names: vec![String::new(), "Bo".into()] });
+        });
+        id
+    }
+
+    #[test]
+    fn a_long_note_keeps_its_text_to_a_share_of_the_page() {
+        let (mut app, ctx, engine) = app("long");
+        let id = long_note(&engine, 600);
+        // As a phone shows it: only the text's section open.
+        app.expand_all = false;
+        lays_out(&mut app, &ctx, "list with a long note");
+        app.open_note(&id);
+        lays_out(&mut app, &ctx, "long note");
+        let detail = app.detail.as_ref().unwrap();
+        assert!(detail.body.len() > 40_000 && detail.body.contains("\n\nBo: Part 3 "), "{}", &detail.body[..200]);
+        let (card, page, room) = detail.laid_out();
+        assert!(room > 500.0, "{room}");
+        assert!(card <= room * 0.7 && card >= room * 0.55, "the text takes {card} of {room}");
+        // Nothing is left over to scroll the page by: the headings and the bar stay put.
+        assert!(page <= room && page > room - 4.0, "the page is {page} in {room}");
+
+        // The menus open over it, and stay open until something is chosen.
+        for menu in [ui::notes::Menu::Share, ui::notes::Menu::More] {
+            app.menu = Some(menu);
+            lays_out(&mut app, &ctx, "long note with a menu open");
+            assert_eq!(app.menu, Some(menu));
+        }
+        app.menu = None;
+
+        // With the timeline unfolded under it the text gives up room, and the two still
+        // share one page between them.
+        let mut timeline = egui::collapsing_header::CollapsingState::load_with_default_open(&ctx, egui::Id::unique(("section", "timeline")), false);
+        timeline.set_open(true);
+        timeline.store(&ctx);
+        lays_out(&mut app, &ctx, "long note with its timeline open");
+        let (card, page, room) = app.detail.as_ref().unwrap().laid_out();
+        assert!(card >= (room * 0.25).floor() && card < room * 0.5, "the text takes {card} of {room}");
+        assert!(page <= room && page > room - 4.0, "the page is {page} in {room}");
+        // Evenly: neither is left the scraps of the other.
+        let timeline = app.detail.as_ref().unwrap().timeline_tall();
+        assert!((card - timeline).abs() <= 2.0, "text {card}, timeline {timeline}");
+
+        // Leaving the note closes whichever menu was open.
+        app.menu = Some(ui::notes::Menu::Share);
+        app.close_note();
+        assert_eq!(app.menu, None);
+        lays_out(&mut app, &ctx, "list after a long note");
+    }
+
+    #[test]
+    fn with_every_section_open_the_text_gives_way_and_the_timeline_stays_short() {
+        let (mut app, ctx, engine) = app("crowded");
+        let id = long_note(&engine, 600);
+        lays_out(&mut app, &ctx, "list with a long note");
+        app.open_note(&id);
+        lays_out(&mut app, &ctx, "long note with every section open");
+        let detail = app.detail.as_ref().unwrap();
+        let (card, page, room) = detail.laid_out();
+        // Down to its floor, and no further.
+        assert!((card - (room * 0.25).floor()).abs() <= 1.0, "the text takes {card} of {room}");
+        // Every row has a height, and all but the few in view are stepped over: laid out
+        // in full the timeline alone would be dozens of pages.
+        let (rows, tall) = detail.timeline_rows();
+        assert_eq!(rows, 600);
+        assert!(tall > room * 20.0, "{tall}");
+        assert!(page > room && page < room * 2.0, "the page is {page} in {room}");
+
+        // Fewer segments, as after transcribing again, leave no rows behind.
+        engine.edit_note(&id, |note| note.segments.truncate(4));
+        lays_out(&mut app, &ctx, "the same note, short");
+        assert_eq!(app.detail.as_ref().unwrap().timeline_rows().0, 4);
+    }
+
+    #[test]
+    fn back_closes_a_menu_before_it_closes_the_note() {
+        let (mut app, ctx, engine) = app("back");
+        let id = long_note(&engine, 12);
+        lays_out(&mut app, &ctx, "list");
+        app.open_note(&id);
+        app.menu = Some(ui::notes::Menu::More);
+        lays_out(&mut app, &ctx, "note with a menu open");
+        let host = Host::new();
+        let back = |app: &mut ScribeApp| {
+            let press = egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+            let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(411.0, 860.0))), events: vec![press], ..Default::default() };
+            ctx.run_ui(input, |ui| app.screen(ui, &host)).textures_delta.clear();
+        };
+        back(&mut app);
+        assert!(app.menu.is_none() && app.detail.is_some());
+        back(&mut app);
+        assert!(app.detail.is_none());
     }
 
     /// The open note's text carries `label` at the start of a paragraph.

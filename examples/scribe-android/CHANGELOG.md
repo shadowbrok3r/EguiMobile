@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.2.2 — 2026-11-11
+
+A note's screen is rearranged. The player moved to a bar at the bottom that is always in view, with the buttons beside it gathered into two menus: Share (Copy, Share text, Share file, Share audio) and More (Pin, Transcribe again, Delete). The text scrolls in its own area, at most about 70% of the screen, and Speakers, Transcript and Timeline fold away under their headings. Each speaker has a colour: it bands their turns in the text and marks their rows in the timeline and their name under Speakers. The timeline lights the part being played, and tapping the text puts the cursor on the word you tapped instead of at the end.
+
 ## v0.2.1 — 2026-11-11
 
 New: Share file on a note sends its text as a .txt attachment through the share sheet, instead of pasting a long transcript into a message. It is the note's own file from Documents/Scribe, brought up to date first, so nothing is duplicated.

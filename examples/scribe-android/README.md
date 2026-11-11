@@ -74,6 +74,17 @@ why the release is pinned is in `scripts/whisper-export/README.md`.
   to the share sheet, by the address Android's media index has for it, so a long transcript
   goes as an attachment and nothing is copied; a note with no file of its own (unfinished,
   or with text files off) is shared as a copy by way of Downloads.
+- **A note's page** (`src/ui/notes.rs`) is three folding sections, Speakers, Transcript and
+  Timeline, over a bar that holds the player and the Share and More menus, so that everything
+  a note can have done to it stays in reach however long its text runs. The text and the
+  timeline each scroll in an area of their own, as tall as the rest of the page leaves them:
+  at most seven tenths of it, an even split when both are open, a quarter each when the page
+  is crowded, and only then does the page itself scroll. Both are given their height
+  outright, because egui offers a scroll area inside a scrolling page no more than what is
+  left of that page in view. Each speaker has a colour. The text is laid out with their name
+  in it and a band of it behind their turn, by the field's own layouter, so the colours
+  follow every edit; the timeline keeps a table of row heights and lays out only the rows in
+  view, an hour of speech being a thousand of them.
 - **Speakers** (`crates/local-speaker`). Once a note is transcribed, each segment is cut
   into two-second windows, a speaker-verification network on the NPU turns each into a voice
   print, and the prints are grouped; a change of speaker then starts a paragraph under
