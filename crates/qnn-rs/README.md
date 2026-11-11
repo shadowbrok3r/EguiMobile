@@ -78,6 +78,16 @@ device (NPU + skel present); on host it fails cleanly at `backendCreate`/
   the tensor's own integer width, no quantization). An `I32` bound to a
   float/fixed-point tensor errors with `IntInputTypeMismatch`. Needed for token
   ids such as Anima `clip.bin`'s `t5_ids` `[1,512] Int32`.
+- `Context::execute_raw(graph, &[(name, &[u8])], &mut [(name, &mut [u8])])` — the graph
+  on caller-owned buffers in each tensor's own element type: nothing quantized, converted
+  or allocated per tensor. For autoregressive loops that feed one run's outputs into the
+  next. Whisper's decoder takes 30 MB of fp16 cross-attention cache per token; through
+  `execute` that is a round trip to `Vec<f32>` and back costing more than the graph.
+- `Session::burst()` — the burst vote below as a guard that withdraws it on drop
+  (`destroyPowerConfigId`), for a process that stays up between short runs and should not
+  hold the DSP at its top corners while it waits.
+- `fastrpc_available()` — whether `libcdsprpc.so` loads, i.e. whether there is a DSP to
+  reach. False on a host and on an emulator.
 - `Session::set_htp_performance_mode()` / `set_htp_performance_mode(backend)` —
   `deviceGetInfrastructure` → `createPowerConfigId(0,0)` → `setPowerConfig` with
   RPC control latency 100 µs, RPC polling 9999 µs, and DCVS_V3 burst (DCVS

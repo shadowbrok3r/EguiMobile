@@ -30,6 +30,16 @@ const _: () = assert!(std::mem::size_of::<RemoteRpcControlUnsignedModule>() == 8
 const _: () = assert!(std::mem::offset_of!(RemoteRpcControlUnsignedModule, domain) == 0);
 const _: () = assert!(std::mem::offset_of!(RemoteRpcControlUnsignedModule, enable) == 4);
 
+/// Whether this process can reach the compute DSP at all: `libcdsprpc.so` loads. False on a
+/// host, an emulator, and any device with no Qualcomm DSP — where loading the HTP backend
+/// would only fail later, and under an emulator's binary translation not always cleanly.
+pub fn available() -> bool {
+    // Asked once: the answer cannot change within a process, and each ask is a full load and
+    // unload of a vendor library — which a status screen would otherwise do every frame.
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| unsafe { Library::new("libcdsprpc.so") }.is_ok())
+}
+
 /// Request an unsigned PD on the CDSP so the HTP backend can load the unsigned
 /// skel. Soft no-op (logged) if `libcdsprpc.so` or the symbol is unavailable;
 /// never panics. Logs whether it was requested and the returned code.
@@ -77,5 +87,6 @@ mod tests {
     #[test]
     fn host_enable_is_ok_noop() {
         assert!(enable_unsigned_pd().is_ok());
+        assert!(!available());
     }
 }
