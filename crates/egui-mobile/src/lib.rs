@@ -55,6 +55,11 @@ pub use egui_android::ScreenOrientation;
 #[cfg(target_os = "android")]
 pub use egui_android::device_orientation_deg;
 
+/// Android-only microphone capture behind a foreground service, so a recording survives the
+/// screen turning off and the task being swiped away.
+#[cfg(target_os = "android")]
+pub use egui_android::mic;
+
 /// Android-only video decode (MediaCodec) plus the file's audio track, for in-app playback.
 #[cfg(target_os = "android")]
 pub use egui_android::video;

@@ -760,6 +760,7 @@ mod text_actions;
 
 pub mod host;
 pub mod ime_bridge;
+pub mod mic;
 pub mod video;
 pub mod vpn;
 pub use host::{HostExt, ScreenOrientation, StylusProbe, device_orientation_deg};
