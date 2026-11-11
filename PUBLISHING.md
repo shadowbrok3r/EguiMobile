@@ -25,6 +25,7 @@ So the order is always: **bump `version` → build → publish.**
 | Privaxy | `examples/privaxy-android/Cargo.toml` | `privaxy` |
 | Plugins Android | `examples/plugins-android/Cargo.toml` | `plugins-android` |
 | App Store | `examples/appstore-android/Cargo.toml` | `appstore-android` |
+| Scribe | `examples/scribe-android/Cargo.toml` | `scribe` |
 
 Two apps built on this framework live in their own repos and ship the same way with a copy of
 `publish-appstore.sh`: **ComfyUI** (`~/Documents/Rust/Mobile/comfyui-android`, slug
@@ -131,6 +132,10 @@ Repository secrets used (already set): `AS_URL`, `AS_KEY`,
   comfyui's QNN runtime libs come from a proprietary QAIRT SDK that is never in git, so
   a CI build would quietly produce an APK without NPU support. Both publish from a
   machine, comfyui after its `scripts/qnn-stage-libs.sh` has run.
+- **scribe-android** — in this repo, but it bundles the same QNN runtime libs and a speaker
+  network compiled with them, so it publishes from a machine too, after
+  `scripts/qnn-stage-libs.sh examples/scribe-android` and
+  `scripts/speaker-stage.sh examples/scribe-android`.
 - **AOT `.cwasm` plugin builds** — an AOT artifact only loads in the exact wasmtime
   build that produced it, so it has to be compiled by the host, not by CI. CI ships
   the portable `.wasm`; hosts fall back to it automatically.

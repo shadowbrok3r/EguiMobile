@@ -1,0 +1,119 @@
+[package]
+name = "scribe_android"
+# Android versionCode is derived from this: (1<<24)|(major<<16)|(minor<<8)|patch.
+# Bump before every release build — the phone only offers an update whose code is strictly greater.
+version = "0.2.1"
+edition = "2024"
+publish = false
+
+[lib]
+# rlib alongside cdylib so `cargo test` can link the crate on the host.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+egui-mobile = { path = "../../crates/egui-mobile" }
+# Bundles NotoEmoji and emoji-icon-font into the default font chains.
+egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
+egui-icon-pack = { git = "https://github.com/shadowbrok3r/egui-theme-kit", rev = "09d1e793076357ec5d86df7e1d6771d0306f2e70", default-features = false, features = ["phosphor-regular"] }
+# Whisper on the Qualcomm HTP NPU: features, decoding and the two graphs through qnn-rs.
+local-whisper = { path = "../../crates/local-whisper" }
+# Telling a recording's voices apart: windows, clustering and the embedding graph on the NPU.
+local-speaker = { path = "../../crates/local-speaker" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Model packs come from Qualcomm's public release bucket over https. rustls with a bundled
+# webpki-roots CA set, so it verifies with no Android trust store or JNI.
+ureq = { version = "2", default-features = false, features = ["tls"] }
+# The packs ship as zips; deflate only, pure Rust so it cross-compiles.
+zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# localtime_r for note dates and statvfs for free space; already in the tree through qnn-rs.
+libc = "0.2"
+log = "0.4"
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", features = ["native-activity"] }
+android_logger = "0.15"
+# The one JNI call of the app's own (getExternalFilesDir); same version as egui-android.
+jni = "0.21"
+
+# cargo-apk2 reads this to generate the APK manifest.
+[package.metadata.android]
+package = "com.kingsofalchemy.scribe"
+java_sources = "../../crates/egui-android/java"
+# Launcher icon mipmaps, rendered from icon/ic_launcher.svg by scripts/render-icons.sh.
+resources = "res"
+# QNN HTP NPU libs. The proprietary QAIRT .so are not in the repo; scripts/qnn-stage-libs.sh
+# examples/scribe-android populates qnn-runtime-libs/arm64-v8a/ before a build, and cargo-apk2
+# bundles them into the APK's lib/arm64-v8a/.
+runtime_libs = "qnn-runtime-libs"
+# The speaker-embedding network, compiled for this chip by scripts/speaker-export and staged
+# by scripts/speaker-stage.sh examples/scribe-android. Not in the repo either; a build without
+# it runs with telling speakers apart unavailable.
+assets = "assets"
+
+[package.metadata.android.sdk]
+min_sdk_version = 29
+target_sdk_version = 35
+
+# Same shared debug keystore as every app in this repo — a different key would make future
+# updates fail INSTALL_FAILED_UPDATE_INCOMPATIBLE, and uninstalling would take the notes with it.
+[package.metadata.android.signing.release]
+path = "/home/shadowbroker/.android/debug.keystore"
+keystore_password = "android"
+
+[package.metadata.android.application]
+label = "Scribe"
+icon = "@mipmap/ic_launcher"
+has_code = true
+# Unpack bundled .so to nativeLibraryDir so FastRPC can load libQnnHtpV81Skel.so from a real path.
+extract_native_libs = true
+# Dark launch splash; the runtime applies the same theme once it is up.
+theme = "@android:style/Theme.DeviceDefault.NoActionBar"
+# Vendor FastRPC (CDSP). Required on targetSdk 31+ so qnn-rs can dlopen it and request an
+# unsigned PD before HTP loads the skel (without this: deviceCreate 0x36b1 / QnnDsp err 4000).
+[[package.metadata.android.application.uses_native_library]]
+name = "libcdsprpc.so"
+required = false
+
+# EguiNativeActivity hosts a hidden EditText for real IME InputConnection (spacebar cursor).
+[[package.metadata.android.application.activity]]
+name = "com.github.egui_mobile.EguiNativeActivity"
+config_changes = "orientation|keyboardHidden|screenSize|screenLayout|density|uiMode"
+window_soft_input_mode = "adjustResize"
+# One task: tapping the recording notification returns to the running app, not a second copy.
+launch_mode = "singleTask"
+[[package.metadata.android.application.activity.meta_data]]
+name = "android.app.lib_name"
+value = "scribe_android"
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.MAIN"]
+categories = ["android.intent.category.LAUNCHER"]
+
+# Recording with the screen off: Android silences the microphone of an app with no visible
+# activity unless a foreground service of this type is running.
+[[package.metadata.android.application.service]]
+name = "com.github.egui_mobile.EguiMicService"
+exported = false
+foreground_service_type = "microphone"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.RECORD_AUDIO"
+[[package.metadata.android.uses_permission]]
+name = "android.permission.FOREGROUND_SERVICE"
+[[package.metadata.android.uses_permission]]
+name = "android.permission.FOREGROUND_SERVICE_MICROPHONE"
+# The recording notification, and its Stop button, are invisible without this.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.POST_NOTIFICATIONS"
+# Held by the recording service so the screen going off does not suspend capture or transcription.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.WAKE_LOCK"
+# Model pack download.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.INTERNET"
+[[package.metadata.android.uses_permission]]
+name = "android.permission.VIBRATE"
+
+# The shared update bridge talks only to the installed App Store.
+[[package.metadata.android.queries.package]]
+name = "com.kingsofalchemy.appstore"

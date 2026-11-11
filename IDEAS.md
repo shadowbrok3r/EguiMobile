@@ -32,7 +32,8 @@ S26 Ultra's V81 (see the arch-compat note in memory).
 | OpenPose, MediaPipe hand and face | Pose control images from a phone photo. Hand landmarks for ring try-on and finger sizing against a reference card. | Packs, camera frames for live use |
 | Face embedding (ArcFace) | Character consistency check across a LoRA's outputs, an "off-model" flag, face clustering. | Pack |
 | TrOCR | Read prompts out of screenshots. Engraving text. | Pack |
-| Whisper | Prompt dictation. | Pack, mic capture in the Android host |
+| Whisper | Prompt dictation. Shipped as `local-whisper`, in the Scribe app; not yet wired into a prompt field. | Done: AI Hub packs, `egui_mobile::mic` |
+| Speaker embedding (WeSpeaker ResNet34) | Who said what in a recording. Shipped as `local-speaker`, in the Scribe app. | Done: `scripts/speaker-export` |
 | Captioner (Florence-2 base) | Prose captions beside WD14 tags. | Conversion pass |
 | Text embeddings (bge-small, CPU) | Semantic search over prompt history, presets, node docs. LoRA matching by description. | candle only |
 | ★ LLM on the NPU via Genie | See the Genie section below. | `genie-rs` wrapper |
@@ -46,10 +47,12 @@ S26 Ultra's V81 (see the arch-compat note in memory).
 ## Platform work the library would need
 
 - **Background jobs while charging**: tag the whole gallery overnight. Needs a generic foreground
-  service; only the VPN service pattern exists, and the pause/resume hooks are still unplumbed.
+  service; only the VPN and microphone services exist, and the pause/resume hooks are still
+  unplumbed.
 - **Camera frames into Rust**: the host offers a preview layer only. Gates live depth,
   segmentation, try-on, and sizing.
-- **Mic capture on Android**: gates Whisper and Gemma 4 audio input.
+- **Mic capture on Android**: done as `egui_mobile::mic` (`EguiMicService`): 16-bit PCM from a
+  microphone foreground service, into a sink. `Host::mic_level()` is still iOS-only.
 - **Thermal and memory awareness**: read thermal headroom through JNI to back off burst mode, and
   evict caches on the low-memory event.
 - **Pack downloads**: the appstore app as a pack store with resume and checksums, instead of

@@ -139,6 +139,12 @@ mic level (iOS), plus reads like `safe_area_insets()`, `keyboard_height()`, and
 `documents_dir()`. Android extras live behind the `HostExt` trait (self-update via
 `PackageInstaller`, install/overlay/notification permissions, version code).
 
+Android microphone capture is `egui_mobile::mic`: `mic::start(&config, sink)` runs a
+foreground service of type `microphone` that records 16-bit PCM into `sink`, with the screen
+off and with the app swiped away. `mic::hold` ends the capture but keeps the service and its
+wake lock for work that outlasts it, and `mic::release` takes it down. The app declares the
+service and its permissions; `examples/scribe-android/Cargo.toml` has the block.
+
 Android specifics handled by the runtime:
 
 - **Soft keyboard**: `host.request_keyboard(..)` shows/hides the IME on a hidden
@@ -201,6 +207,9 @@ dev-sync, and native `net.http.*`/`net.tcp.*`/`net.udp.*`/`ssh.*` ops on both). 
   wireless hot reload.
 - `examples/desktop-host` — the same plugin host on desktop
   (`cargo run -p desktop-host -- plugins-dist`).
+- `examples/scribe-android` — voice notes transcribed on the NPU: background recording through
+  `egui_mobile::mic`, Whisper on the HTP through `crates/local-whisper`, and the speakers of a
+  recording told apart through `crates/local-speaker`.
 - Apps that outgrew the examples directory consume this repo as a git dependency from their
   own repos: **comfyui-android** (`shadowbrok3r/comfyui-android`, a ComfyUI client with
   on-device NPU models) and **ringdesigner-android** (`crates/ringdesigner-android` in
