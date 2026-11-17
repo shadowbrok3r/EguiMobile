@@ -29,6 +29,7 @@ import android.widget.EditText;
 import android.widget.FrameLayout;
 import java.util.ArrayList;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** NativeActivity with a hidden EditText so the IME gets a real InputConnection. */
 public class EguiNativeActivity extends NativeActivity {
@@ -68,7 +69,8 @@ public class EguiNativeActivity extends NativeActivity {
     /** The hidden EditText's text after its last change, readable from the render thread. */
     private volatile String imeTextSnapshot = "";
     private final ConcurrentLinkedQueue<String> storeRequests = new ConcurrentLinkedQueue<>();
-    private final ConcurrentLinkedQueue<String> viewIntents = new ConcurrentLinkedQueue<>();
+    /** Latest unread ACTION_VIEW data URI; a newer link replaces an unread one. */
+    private final AtomicReference<String> deepLink = new AtomicReference<>();
     private EguiStoreBridge storeBridge;
 
     @Override
@@ -90,7 +92,7 @@ public class EguiNativeActivity extends NativeActivity {
         registerInstallReceiver();
         storeBridge = new EguiStoreBridge(this);
         receiveStoreIntent(getIntent());
-        if (savedInstanceState == null) receiveViewIntent(getIntent());
+        if (savedInstanceState == null) receiveDeepLink(getIntent());
     }
 
     /** Dark DeviceDefault theme for an activity whose manifest names no theme. */
@@ -121,18 +123,20 @@ public class EguiNativeActivity extends NativeActivity {
     }
 
     @Override protected void onNewIntent(Intent intent) {
-        super.onNewIntent(intent);setIntent(intent);receiveStoreIntent(intent);receiveViewIntent(intent);
+        super.onNewIntent(intent);setIntent(intent);receiveStoreIntent(intent);receiveDeepLink(intent);
     }
-    private void receiveViewIntent(Intent intent) {
+    private void receiveDeepLink(Intent intent) {
         if (intent == null || !Intent.ACTION_VIEW.equals(intent.getAction())) return;
+        // Skips the original intent replayed when a link-launched task is reopened from Recents.
+        if ((intent.getFlags() & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0) return;
         String uri = intent.getDataString();
-        if (uri == null || uri.length() > 16384 || viewIntents.size() >= 4) return;
-        viewIntents.add(uri);
+        if (uri == null || uri.length() > 16384) return;
+        deepLink.set(uri);
         try { nativeImeWake(); } catch (Throwable ignored) {}
     }
     /** Consumed once by the native app; never log URLs, which can contain pairing credentials. */
-    public String takeViewIntent() {
-        String uri = viewIntents.poll();
+    public String takeDeepLink() {
+        String uri = deepLink.getAndSet(null);
         return uri == null ? "" : uri;
     }
     private void receiveStoreIntent(Intent intent) {

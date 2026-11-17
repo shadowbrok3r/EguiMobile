@@ -475,13 +475,8 @@ fn detect_kotlin_home() -> Option<PathBuf> {
 /// was scaffolded drifts as soon as the git dependency moves; syncing before every package keeps
 /// both at one revision. An in-tree app whose `java_sources` is the crate's own directory already
 /// has them.
-fn sync_java_sources() -> Result<()> {
-    let manifest = fs::read_to_string("Cargo.toml").context("reading Cargo.toml")?;
-    let manifest: toml::Table = toml::from_str(&manifest).context("parsing Cargo.toml")?;
-    let Some(java_sources) = manifest
-        .get("package")
-        .and_then(|v| v.get("metadata"))
-        .and_then(|v| v.get("android"))
+fn sync_java_sources(manifest: &toml::Table) -> Result<()> {
+    let Some(java_sources) = android_metadata(manifest)
         .and_then(|v| v.get("java_sources"))
         .and_then(|v| v.as_str())
     else {
@@ -506,6 +501,41 @@ fn sync_java_sources() -> Result<()> {
         println!("synced {} from egui-android", to.display());
     }
     Ok(())
+}
+
+fn android_metadata(manifest: &toml::Table) -> Option<&toml::Value> {
+    manifest.get("package")?.get("metadata")?.get("android")
+}
+
+/// `(name, launch_mode)` of each activity that handles ACTION_VIEW without a single-instance mode.
+fn multi_instance_view_activities(manifest: &toml::Table) -> Vec<(&str, &str)> {
+    let activities = android_metadata(manifest)
+        .and_then(|v| v.get("application"))
+        .and_then(|v| v.get("activity"))
+        .and_then(|v| v.as_array());
+    let mut out = Vec::new();
+    for activity in activities.into_iter().flatten() {
+        let filters = activity.get("intent_filter").and_then(|v| v.as_array());
+        let handles_view = filters.into_iter().flatten().any(|f| {
+            let actions = f.get("actions").and_then(|v| v.as_array());
+            actions.into_iter().flatten().any(|a| a.as_str() == Some("android.intent.action.VIEW"))
+        });
+        let mode = activity.get("launch_mode").and_then(|v| v.as_str()).unwrap_or("standard");
+        if handles_view && !matches!(mode, "singleTask" | "singleInstance" | "singleInstancePerTask") {
+            out.push((activity.get("name").and_then(|v| v.as_str()).unwrap_or("activity"), mode));
+        }
+    }
+    out
+}
+
+fn warn_deep_link_launch_mode(manifest: &toml::Table) {
+    for (name, mode) in multi_instance_view_activities(manifest) {
+        eprintln!(
+            "warning: {name} handles android.intent.action.VIEW with launch_mode \"{mode}\", so a
+                      link opened while the app runs starts a second activity instead of reaching
+                      HostExt::take_deep_link. Set launch_mode = \"singleTask\" on that activity."
+        );
+    }
 }
 
 fn collect_java(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -557,7 +587,10 @@ fn cmd_apk(sub: &str, args: &BuildArgs, device: Option<&str>) -> Result<()> {
     if sub == "run" && args.release {
         warn_release_on_emulator();
     }
-    sync_java_sources()?;
+    let manifest = fs::read_to_string("Cargo.toml").context("reading Cargo.toml")?;
+    let manifest: toml::Table = toml::from_str(&manifest).context("parsing Cargo.toml")?;
+    sync_java_sources(&manifest)?;
+    warn_deep_link_launch_mode(&manifest);
     let mut cmd = Command::new("cargo");
     cmd.arg("apk2").arg(sub).arg("--target").arg("aarch64-linux-android");
     if args.release {
@@ -615,7 +648,33 @@ fn warn_release_on_emulator() {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_tcp_serial;
+    use super::{multi_instance_view_activities, normalize_tcp_serial};
+
+    #[test]
+    fn view_activity_needs_single_task() {
+        let toml = |mode: &str| -> toml::Table {
+            toml::from_str(&format!(
+                r#"
+[[package.metadata.android.application.activity]]
+name = "A"
+{mode}
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.MAIN"]
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.VIEW"]
+[[package.metadata.android.application.activity]]
+name = "B"
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.MAIN"]
+"#
+            ))
+            .unwrap()
+        };
+        assert_eq!(multi_instance_view_activities(&toml("")), [("A", "standard")]);
+        assert_eq!(multi_instance_view_activities(&toml(r#"launch_mode = "singleTop""#)), [("A", "singleTop")]);
+        assert!(multi_instance_view_activities(&toml(r#"launch_mode = "singleTask""#)).is_empty());
+        assert!(multi_instance_view_activities(&toml::Table::new()).is_empty());
+    }
 
     #[test]
     fn tcp_serial_defaults_port() {
