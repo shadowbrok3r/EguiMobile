@@ -14,7 +14,7 @@ crate-type = ["cdylib", "rlib"]
 egui-mobile = { path = "../../crates/egui-mobile" }
 # Bundles NotoEmoji and emoji-icon-font into the default font chains.
 egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
-egui-icon-pack = { git = "https://github.com/shadowbrok3r/egui-theme-kit", rev = "09d1e793076357ec5d86df7e1d6771d0306f2e70", default-features = false, features = ["phosphor-regular"] }
+egui-icon-pack = { git = "https://github.com/shadowbrok3r/egui-theme-kit", rev = "7a5beb53c62f65f70e5c3b24ac57a82c6a189d87", default-features = false, features = ["phosphor-regular"] }
 # Whisper on the Qualcomm HTP NPU: features, decoding and the two graphs through qnn-rs.
 local-whisper = { path = "../../crates/local-whisper" }
 # Telling a recording's voices apart: windows, clustering and the embedding graph on the NPU.
