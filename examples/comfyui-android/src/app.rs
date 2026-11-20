@@ -479,6 +479,31 @@ struct MyPrompt {
     added: f64,
 }
 
+/// One Models-pane row: loader filename, kind, catalog metadata.
+type ModelRow = (String, ModelKind, Option<crate::types::CheckpointEntry>);
+
+/// Inputs the Models-pane grouping depends on; a mismatch triggers a rebuild.
+#[derive(PartialEq)]
+struct ModelsPaneKey {
+    generation: u64,
+    filter: String,
+    kind: Option<ModelKind>,
+    sort: CheckpointSort,
+    favorites: Vec<String>,
+    recents: Vec<String>,
+}
+
+/// Grouped + sorted Models-pane rows, kept across frames.
+#[derive(Default)]
+struct ModelsPaneCache {
+    key: Option<ModelsPaneKey>,
+    fav_files: HashSet<String>,
+    /// Favorite groups in header order: display name -> sorted versions.
+    fav_groups: Vec<(String, Vec<ModelRow>)>,
+    /// Families in header order, each with its groups in header order.
+    families: Vec<(String, Vec<(String, Vec<ModelRow>)>)>,
+}
+
 struct ComfyApp {
     engine: Option<Engine>,
     loaded: bool,
@@ -525,6 +550,9 @@ struct ComfyApp {
     settings_pane: SettingsPane,
     lora_catalog: LoraCatalog,
     checkpoint_catalog: CheckpointCatalog,
+    /// Bumped whenever the catalog or the server model lists are replaced.
+    models_gen: u64,
+    models_pane_cache: ModelsPaneCache,
     /// Installed LoRA filenames from `object_info` (`LoraLoader.lora_name`).
     installed_loras: Vec<String>,
     lora_filter: String,
@@ -1102,6 +1130,8 @@ impl ComfyApp {
             settings_pane: SettingsPane::Server,
             lora_catalog: LoraCatalog::default(),
             checkpoint_catalog: CheckpointCatalog::default(),
+            models_gen: 0,
+            models_pane_cache: ModelsPaneCache::default(),
             installed_loras: Vec::new(),
             lora_filter: String::new(),
             presets: Vec::new(),
@@ -1742,6 +1772,7 @@ impl ComfyApp {
                     }
                 }
                 self.checkpoint_catalog = catalog;
+                self.models_gen += 1;
             }
             Msg::CheckpointCatalogError(err) => {
                 self.log.warn(format!("checkpoint catalog: {err}"));
@@ -1789,6 +1820,7 @@ impl ComfyApp {
                 if !models.unets.is_empty() {
                     self.unets = models.unets;
                 }
+                self.models_gen += 1;
                 if !models.clips.is_empty() {
                     self.clip_files = models.clips;
                 }
@@ -5704,50 +5736,9 @@ impl ComfyApp {
     #[cfg(not(feature = "local-npu"))]
     fn local_models_section(&mut self, _ui: &mut egui::Ui, _host: &Host) {}
 
-    fn create_models_pane(&mut self, ui: &mut egui::Ui, host: &Host) {
-        self.local_models_section(ui, host);
-        let list_w = (ui.clip_rect().width() - 12.0).clamp(160.0, ui.available_width());
-        ui.set_max_width(list_w);
-
-        let catalog_n = self.checkpoint_catalog.checkpoints.len();
-        if catalog_n == 0 {
-            ui.weak("No checkpoint catalog yet — showing installed models.");
-        } else {
-            ui.weak(format!("Catalog: {catalog_n} entries · grouped by family"));
-        }
-
-        if !self.unets.is_empty() {
-            ui.horizontal_wrapped(|ui| {
-                ui.selectable_value(&mut self.models_kind_filter, None, "All");
-                ui.selectable_value(
-                    &mut self.models_kind_filter,
-                    Some(ModelKind::Checkpoint),
-                    format!("Checkpoints ({})", self.checkpoints.len()),
-                );
-                ui.selectable_value(
-                    &mut self.models_kind_filter,
-                    Some(ModelKind::Diffusion),
-                    format!("Diffusion ({})", self.unets.len()),
-                );
-            });
-        }
-
-        ui.add(
-            egui::TextEdit::singleline(&mut self.ckpt_filter)
-                .hint_text("filter models")
-                .desired_width(list_w - 8.0),
-        );
-
-        ui.horizontal(|ui| {
-            ui.label(format!("{} Sort", icons::SORT));
-            for sort in [CheckpointSort::Name, CheckpointSort::Recent] {
-                ui.selectable_value(&mut self.checkpoint_sort, sort, sort.label());
-            }
-        });
-
-        type ModelRow = (String, ModelKind, Option<crate::types::CheckpointEntry>);
+    /// Rebuild the grouped/sorted Models-pane rows and store them under `key`.
+    fn rebuild_models_pane_cache(&mut self, key: ModelsPaneKey) {
         let filter = self.ckpt_filter.to_lowercase();
-        let current = self.params.model_file().to_string();
         let recent_rank: HashMap<String, usize> = self
             .checkpoint_recent
             .iter()
@@ -5821,26 +5812,26 @@ impl ComfyApp {
             .collect();
 
         // Favorites: Name → versions (same nesting as family groups).
-        let mut fav_groups: std::collections::BTreeMap<String, Vec<ModelRow>> =
+        let mut fav_map: std::collections::BTreeMap<String, Vec<ModelRow>> =
             std::collections::BTreeMap::new();
         for (file, kind, meta) in rows.iter().filter(|(f, _, _)| fav_files.contains(f)) {
             let group = meta
                 .as_ref()
                 .map(|e| e.display_name().to_string())
                 .unwrap_or_else(|| file_basename(file).to_string());
-            fav_groups
+            fav_map
                 .entry(group)
                 .or_default()
                 .push((file.clone(), *kind, meta.clone()));
         }
-        for versions in fav_groups.values_mut() {
+        for versions in fav_map.values_mut() {
             versions.sort_by(cmp_rows);
         }
-        let mut fav_group_names: Vec<String> = fav_groups.keys().cloned().collect();
+        let mut fav_group_names: Vec<String> = fav_map.keys().cloned().collect();
         if sort == CheckpointSort::Recent {
             fav_group_names.sort_by(|a, b| {
                 let best = |g: &str| {
-                    fav_groups
+                    fav_map
                         .get(g)
                         .into_iter()
                         .flatten()
@@ -5851,8 +5842,12 @@ impl ComfyApp {
                 best(a).cmp(&best(b)).then_with(|| a.cmp(b))
             });
         }
+        let fav_groups: Vec<(String, Vec<ModelRow>)> = fav_group_names
+            .into_iter()
+            .filter_map(|g| fav_map.remove(&g).map(|v| (g, v)))
+            .collect();
 
-        let mut families: std::collections::BTreeMap<
+        let mut family_map: std::collections::BTreeMap<
             String,
             std::collections::BTreeMap<String, Vec<ModelRow>>,
         > = std::collections::BTreeMap::new();
@@ -5862,24 +5857,24 @@ impl ComfyApp {
                 .as_ref()
                 .map(|e| e.display_name().to_string())
                 .unwrap_or_else(|| file_basename(&file).to_string());
-            families
+            family_map
                 .entry(family)
                 .or_default()
                 .entry(group)
                 .or_default()
                 .push((file, kind, meta));
         }
-        for groups in families.values_mut() {
+        for groups in family_map.values_mut() {
             for versions in groups.values_mut() {
                 versions.sort_by(cmp_rows);
             }
         }
 
-        let mut family_order: Vec<String> = families.keys().cloned().collect();
+        let mut family_order: Vec<String> = family_map.keys().cloned().collect();
         if sort == CheckpointSort::Recent {
             family_order.sort_by(|a, b| {
                 let best = |fam: &str| {
-                    families
+                    family_map
                         .get(fam)
                         .into_iter()
                         .flat_map(|g| g.values())
@@ -5891,15 +5886,104 @@ impl ComfyApp {
                 best(a).cmp(&best(b)).then_with(|| a.cmp(b))
             });
         }
+        let families: Vec<(String, Vec<(String, Vec<ModelRow>)>)> = family_order
+            .into_iter()
+            .filter_map(|family| {
+                let mut groups = family_map.remove(&family)?;
+                let mut group_names: Vec<String> = groups.keys().cloned().collect();
+                if sort == CheckpointSort::Recent {
+                    group_names.sort_by(|a, b| {
+                        let best = |g: &str| {
+                            groups
+                                .get(g)
+                                .into_iter()
+                                .flatten()
+                                .map(|(f, _, _)| {
+                                    recent_rank.get(f).copied().unwrap_or(usize::MAX)
+                                })
+                                .min()
+                                .unwrap_or(usize::MAX)
+                        };
+                        best(a).cmp(&best(b)).then_with(|| a.cmp(b))
+                    });
+                }
+                let ordered: Vec<(String, Vec<ModelRow>)> = group_names
+                    .into_iter()
+                    .filter_map(|g| groups.remove(&g).map(|v| (g, v)))
+                    .collect();
+                Some((family, ordered))
+            })
+            .collect();
+
+        self.models_pane_cache =
+            ModelsPaneCache { key: Some(key), fav_files, fav_groups, families };
+    }
+
+    fn create_models_pane(&mut self, ui: &mut egui::Ui, host: &Host) {
+        self.local_models_section(ui, host);
+        let list_w = (ui.clip_rect().width() - 12.0).clamp(160.0, ui.available_width());
+        ui.set_max_width(list_w);
+
+        let catalog_n = self.checkpoint_catalog.checkpoints.len();
+        if catalog_n == 0 {
+            ui.weak("No checkpoint catalog yet — showing installed models.");
+        } else {
+            ui.weak(format!("Catalog: {catalog_n} entries · grouped by family"));
+        }
+
+        if !self.unets.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.selectable_value(&mut self.models_kind_filter, None, "All");
+                ui.selectable_value(
+                    &mut self.models_kind_filter,
+                    Some(ModelKind::Checkpoint),
+                    format!("Checkpoints ({})", self.checkpoints.len()),
+                );
+                ui.selectable_value(
+                    &mut self.models_kind_filter,
+                    Some(ModelKind::Diffusion),
+                    format!("Diffusion ({})", self.unets.len()),
+                );
+            });
+        }
+
+        ui.add(
+            egui::TextEdit::singleline(&mut self.ckpt_filter)
+                .hint_text("filter models")
+                .desired_width(list_w - 8.0),
+        );
+
+        ui.horizontal(|ui| {
+            ui.label(format!("{} Sort", icons::SORT));
+            for sort in [CheckpointSort::Name, CheckpointSort::Recent] {
+                ui.selectable_value(&mut self.checkpoint_sort, sort, sort.label());
+            }
+        });
+
+        let current = self.params.model_file().to_string();
+        let key = ModelsPaneKey {
+            generation: self.models_gen,
+            filter: self.ckpt_filter.clone(),
+            kind: self.models_kind_filter,
+            sort: self.checkpoint_sort,
+            favorites: self.checkpoint_favorites.clone(),
+            recents: self.checkpoint_recent.clone(),
+        };
+        if self.models_pane_cache.key.as_ref() != Some(&key) {
+            self.rebuild_models_pane_cache(key);
+        }
 
         let mut pick: Option<(String, ModelKind)> = None;
         let mut toggle_fav: Option<String> = None;
         let force_closed = self.checkpoints_force_collapse;
         let mut shown = 0usize;
+        let cache = &self.models_pane_cache;
+        let no_rows = cache.fav_groups.is_empty() && cache.families.is_empty();
 
-        if !fav_groups.is_empty() {
-            let fav_n: usize = fav_groups.values().map(|v| v.len()).sum();
-            let any_selected = fav_groups.values().flatten().any(|(f, _, _)| *f == current);
+        if !cache.fav_groups.is_empty() {
+            let fav_n: usize = cache.fav_groups.iter().map(|(_, v)| v.len()).sum();
+            let any_selected =
+                cache.fav_groups.iter().flat_map(|(_, v)| v).any(|(f, _, _)| *f == current);
             let header = if any_selected {
                 format!("{} {} Favorites ({fav_n})", icons::CHECK, icons::STAR)
             } else {
@@ -5911,10 +5995,7 @@ impl ComfyApp {
                 .open(if force_closed { Some(true) } else { None })
                 .show(ui, |ui| {
                     ui.set_max_width(ui.available_width());
-                    for group_name in &fav_group_names {
-                        let Some(versions) = fav_groups.get(group_name) else {
-                            continue;
-                        };
+                    for (group_name, versions) in &cache.fav_groups {
                         if shown >= 120 {
                             break;
                         }
@@ -5951,16 +6032,13 @@ impl ComfyApp {
                 });
         }
 
-        for family in &family_order {
-            let Some(groups) = families.get(family) else {
-                continue;
-            };
+        for (family, groups) in &cache.families {
             if shown >= 120 {
                 ui.weak("… more — type to filter");
                 break;
             }
-            let family_count: usize = groups.values().map(|v| v.len()).sum();
-            let any_selected = groups.values().flatten().any(|(f, _, _)| *f == current);
+            let family_count: usize = groups.iter().map(|(_, v)| v.len()).sum();
+            let any_selected = groups.iter().flat_map(|(_, v)| v).any(|(f, _, _)| *f == current);
             let family_header = if any_selected {
                 format!("{} {family} ({family_count})", icons::CHECK)
             } else {
@@ -5972,27 +6050,7 @@ impl ComfyApp {
                 .open(if force_closed { Some(false) } else { None })
                 .show(ui, |ui| {
                     ui.set_max_width(ui.available_width());
-                    let mut group_names: Vec<&String> = groups.keys().collect();
-                    if sort == CheckpointSort::Recent {
-                        group_names.sort_by(|a, b| {
-                            let best = |g: &String| {
-                                groups
-                                    .get(g)
-                                    .into_iter()
-                                    .flatten()
-                                    .map(|(f, _, _)| {
-                                        recent_rank.get(f).copied().unwrap_or(usize::MAX)
-                                    })
-                                    .min()
-                                    .unwrap_or(usize::MAX)
-                            };
-                            best(a).cmp(&best(b)).then_with(|| a.cmp(b))
-                        });
-                    }
-                    for group_name in group_names {
-                        let Some(versions) = groups.get(group_name) else {
-                            continue;
-                        };
+                    for (group_name, versions) in groups {
                         // Always Name, then versions — never flatten a lone version to the family list.
                         let any_sel = versions.iter().any(|(f, _, _)| *f == current);
                         let max_name_w = (ui.available_width() - 22.0).max(32.0);
@@ -6009,7 +6067,7 @@ impl ComfyApp {
                             .show(ui, |ui| {
                                 ui.set_max_width(ui.available_width());
                                 for (file, kind, meta) in versions {
-                                    let fav = fav_files.contains(file);
+                                    let fav = cache.fav_files.contains(file);
                                     model_version_row(
                                         ui,
                                         file,
@@ -6035,7 +6093,7 @@ impl ComfyApp {
         if let Some(file) = toggle_fav {
             self.toggle_checkpoint_favorite(&file);
         }
-        if fav_groups.is_empty() && families.is_empty() {
+        if no_rows {
             let empty = self.checkpoints.is_empty() && self.unets.is_empty();
             ui.weak(if empty {
                 "No models on the server."
