@@ -108,7 +108,7 @@ impl GpuVideoSurface {
                 for (kind, source) in [
                     (
                         glow::VERTEX_SHADER,
-                        "#version 100\nattribute vec2 a_position; varying vec2 v_uv; uniform mat4 u_transform; void main(){gl_Position=vec4(a_position,0.0,1.0);v_uv=(u_transform*vec4((a_position+1.0)*0.5,0.0,1.0)).xy;}",
+                        "#version 100\nattribute vec2 a_position; varying vec2 v_uv; uniform mat4 u_transform; uniform vec4 u_crop; void main(){gl_Position=vec4(a_position,0.0,1.0);v_uv=(u_transform*vec4(u_crop.xy+(a_position+1.0)*0.5*u_crop.zw,0.0,1.0)).xy;}",
                     ),
                     (glow::FRAGMENT_SHADER, FRAGMENT),
                 ] {
@@ -267,7 +267,25 @@ impl GpuVideoSurface {
                     return;
                 }
                 let gl = &inner.gl;
-                let viewport = info.viewport_in_pixels();
+                // Only the on-screen part is drawn, sampling the matching part of the frame: a
+                // viewport larger than the screen is clamped by egui and would squeeze the frame.
+                let full = info.viewport;
+                let shown = full.intersect(info.clip_rect);
+                if !shown.is_positive() {
+                    return;
+                }
+                let viewport = egui::epaint::ViewportInPixels::from_points(
+                    &shown,
+                    info.pixels_per_point,
+                    info.screen_size_px,
+                );
+                // Quad space runs bottom-up, as GL's does.
+                let crop = [
+                    (shown.left() - full.left()) / full.width(),
+                    (full.bottom() - shown.bottom()) / full.height(),
+                    shown.width() / full.width(),
+                    shown.height() / full.height(),
+                ];
                 unsafe {
                     let mut previous = [0; 4];
                     gl.get_parameter_i32_slice(glow::VIEWPORT, &mut previous);
@@ -314,6 +332,13 @@ impl GpuVideoSurface {
                             .as_ref(),
                         false,
                         &matrix,
+                    );
+                    gl.uniform_4_f32(
+                        gl.get_uniform_location(inner.program, "u_crop").as_ref(),
+                        crop[0],
+                        crop[1],
+                        crop[2],
+                        crop[3],
                     );
                     let size = bind_lut(gl, &inner.lut);
                     gl.uniform_1_i32(gl.get_uniform_location(inner.program, "u_lut").as_ref(), 2);
