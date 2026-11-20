@@ -108,7 +108,7 @@ pub fn register_natives() {
 ///
 /// Must not use `FindClass` for the app class: on the render thread JNI uses the system
 /// ClassLoader, which cannot see `com.github.egui_mobile.*` and throws ClassNotFoundException.
-fn is_egui_activity(env: &mut jni::JNIEnv, activity: &jni::objects::JObject) -> jni::errors::Result<bool> {
+pub(crate) fn is_egui_activity(env: &mut jni::JNIEnv, activity: &jni::objects::JObject) -> jni::errors::Result<bool> {
     if let Some(&cached) = IS_EGUI_ACTIVITY.get() {
         return Ok(cached);
     }

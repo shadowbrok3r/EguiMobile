@@ -637,7 +637,7 @@ impl PrivaxyApp {
         #[cfg(target_os = "android")]
         {
             use egui_mobile::HostExt;
-            if let Some(uri) = host.take_view_intent() {
+            if let Some(uri) = host.take_deep_link() {
                 match crate::proxy::pairing::DesktopPairing::parse(&uri) {
                     Ok(_) => {
                         self.forget_desktop = None;

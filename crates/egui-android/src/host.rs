@@ -2213,8 +2213,18 @@ pub trait HostExt {
     fn open_app_store(&self);
     /// App Store only: consume a join link or a requested package detail page as JSON.
     fn take_store_request(&self) -> Option<String>;
-    /// Consume the next ACTION_VIEW URL, from a cold launch or onNewIntent.
-    fn take_view_intent(&self) -> Option<String>;
+    /// Consume the latest unread deep link: the data URI of an ACTION_VIEW intent that launched
+    /// the app or reached `onNewIntent`. Each link is returned once, a newer link replaces an unread
+    /// one, and its arrival requests a repaint. `None` on a plain `NativeActivity`.
+    ///
+    /// The activity declares the scheme in an intent filter and needs `launch_mode = "singleTask"`
+    /// so a link arriving while the app runs reaches this instance; README.md, "Deep links".
+    fn take_deep_link(&self) -> Option<String>;
+    /// Renamed to [`take_deep_link`](HostExt::take_deep_link).
+    #[deprecated(note = "renamed to `take_deep_link`")]
+    fn take_view_intent(&self) -> Option<String> {
+        self.take_deep_link()
+    }
     /// App Store only: apply its saved background update preference.
     fn configure_store_updates(&self);
     /// Lock or release the screen orientation. See [`ScreenOrientation`].
@@ -2377,9 +2387,10 @@ impl HostExt for Host {
         });
         value.filter(|s:&String|!s.is_empty())
     }
-    fn take_view_intent(&self) -> Option<String> {
-        let value = with_activity(|env, activity| {
-            let obj = env.call_method(activity, "takeViewIntent", "()Ljava/lang/String;", &[])?.l()?;
+    fn take_deep_link(&self) -> Option<String> {
+        let value = with_native_activity(|env, activity| {
+            if !crate::ime_bridge::is_egui_activity(env, activity)? { return Ok(String::new()); }
+            let obj = env.call_method(activity, "takeDeepLink", "()Ljava/lang/String;", &[])?.l()?;
             if obj.is_null() { return Ok(String::new()); }
             let value = env.get_string(&jni::objects::JString::from(obj))?.into();
             Ok(value)

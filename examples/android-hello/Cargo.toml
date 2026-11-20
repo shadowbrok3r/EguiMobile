@@ -46,9 +46,16 @@ name = "android.permission.RECORD_AUDIO"
 name = "com.github.egui_mobile.EguiNativeActivity"
 config_changes = "orientation|keyboardHidden|screenSize|screenLayout|density|uiMode"
 window_soft_input_mode = "adjustResize"
+launch_mode = "singleTask"
 [[package.metadata.android.application.activity.meta_data]]
 name = "android.app.lib_name"
 value = "android_hello"
 [[package.metadata.android.application.activity.intent_filter]]
 actions = ["android.intent.action.MAIN"]
 categories = ["android.intent.category.LAUNCHER"]
+# Deep links: egui-hello://anything opens the app; HostExt::take_deep_link reads it.
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.VIEW"]
+categories = ["android.intent.category.DEFAULT", "android.intent.category.BROWSABLE"]
+[[package.metadata.android.application.activity.intent_filter.data]]
+scheme = "egui-hello"

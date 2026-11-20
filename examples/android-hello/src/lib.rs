@@ -1,6 +1,6 @@
 //! Android demo — the same `impl EguiApp` shape as the iOS examples, built as an Android cdylib.
 //! Exercises the common Host capabilities plus the Android-only `HostExt` (self-update, install /
-//! overlay permission, number keypad, large-file sharing).
+//! overlay permission, number keypad, large-file sharing, deep links).
 
 use egui_mobile::egui;
 use egui_mobile::{CreateContext, EguiApp, Haptic, Host, HostExt, Permission, app, keyboard};
@@ -20,6 +20,7 @@ struct Demo {
     enter_down: u32,
     enter_up: u32,
     share_status: String,
+    deep_link: String,
 }
 
 impl Demo {
@@ -36,6 +37,7 @@ impl Demo {
             enter_down: 0,
             enter_up: 0,
             share_status: String::new(),
+            deep_link: String::new(),
         }
     }
 
@@ -142,6 +144,9 @@ impl EguiApp for Demo {
     }
 
     fn update(&mut self, ui: &mut egui::Ui, host: &Host) {
+        if let Some(link) = host.take_deep_link() {
+            self.deep_link = link;
+        }
         if self.text_actions_test {
             ui.horizontal(|ui| {
                 if ui.button("Back to demo").clicked() {
@@ -214,6 +219,11 @@ impl EguiApp for Demo {
 
         ui.separator();
         ui.label(format!("Android-only (versionCode {})", host.current_version_code()));
+        if self.deep_link.is_empty() {
+            ui.label("Deep link: open egui-hello://test");
+        } else {
+            ui.label(format!("Deep link: {}", self.deep_link));
+        }
         ui.horizontal_wrapped(|ui| {
             ui.label(format!("can install: {}", host.can_install_packages()));
             if ui.button("Grant install").clicked() {

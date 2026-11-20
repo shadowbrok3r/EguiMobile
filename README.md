@@ -137,7 +137,7 @@ The app talks to the platform through [`Host`]: `share_file`/`share_text`, `noti
 `haptic`, `open_url`, `copy_text`, `pick_file`, `request_permission`, camera preview and
 mic level (iOS), plus reads like `safe_area_insets()`, `keyboard_height()`, and
 `documents_dir()`. Android extras live behind the `HostExt` trait (self-update via
-`PackageInstaller`, install/overlay/notification permissions, version code).
+`PackageInstaller`, install/overlay/notification permissions, version code, deep links).
 
 Android specifics handled by the runtime:
 
@@ -160,6 +160,30 @@ Android specifics handled by the runtime:
   1 MiB Java array, so its size is bounded by storage rather than the Java heap.
   `HostExt::take_share_outcome()` then reports `Ok(folder)` once the share sheet opened, or
   `Err(reason)` with nothing left behind in MediaStore.
+- **Deep links**: a link such as `myapp://join?code=42` (a QR code scanned with the Camera
+  app, a browser, another app) opens the app once its activity declares the scheme:
+
+  ```toml
+  [[package.metadata.android.application.activity]]
+  name = "com.github.egui_mobile.EguiNativeActivity"
+  launch_mode = "singleTask"
+  # …config_changes, meta_data and the MAIN/LAUNCHER filter as before…
+  [[package.metadata.android.application.activity.intent_filter]]
+  actions = ["android.intent.action.VIEW"]
+  categories = ["android.intent.category.DEFAULT", "android.intent.category.BROWSABLE"]
+  [[package.metadata.android.application.activity.intent_filter.data]]
+  scheme = "myapp"
+  # host = "join"   # optional: narrows the filter to myapp://join…
+  ```
+
+  `HostExt::take_deep_link()` returns the URI once, from a cold launch or from `onNewIntent`
+  while running; a newer link replaces an unread one, and its arrival requests a repaint, so
+  polling it in `update` is enough. `launch_mode = "singleTask"` keeps one activity: under the
+  default mode a link opened while the app runs starts a second `EguiNativeActivity`, and
+  `cargo egui-mobile build` warns about it. Reopening a link-launched app from Recents does not
+  replay the link. Test without a camera:
+  `adb shell am start -a android.intent.action.VIEW -d 'myapp://join?code=42'`. Treat the URI as
+  untrusted input, and do not log it if it can carry credentials.
 - **Clipboard + text actions**: egui has no Android selection menu, so while a text field
   is being edited the runtime reserves a strip above the keyboard for
   **Paste / Copy / Cut / Select all**. App layouts, windows and scroll areas receive
