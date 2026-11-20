@@ -1,0 +1,15 @@
+[package]
+name = "local-speaker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "On-device speaker labelling: Kaldi fbank features, window planning and the clustering that decides how many voices there are are pure and host-testable; the embedding graph runs on the Qualcomm HTP via qnn-rs."
+
+[dependencies]
+log = { workspace = true }
+memmap2 = "0.9"
+qnn-rs = { path = "../qnn-rs" }
+# 512-point real FFT for the fbank front end; pure Rust, so it cross-compiles to the NDK.
+realfft = "3"
+thiserror = "2.0.19"

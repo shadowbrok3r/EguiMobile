@@ -177,6 +177,35 @@ impl<'b> Session<'b> {
     pub fn set_htp_performance_mode(&self) -> Result<()> {
         set_htp_performance_mode(self.backend)
     }
+
+    /// The same burst vote, withdrawn when the returned guard drops.
+    ///
+    /// [`Session::set_htp_performance_mode`] votes for the life of the process, which suits a
+    /// job that runs and exits. A process that stays up between short runs — hours of
+    /// recording with a decode every few seconds — would otherwise hold the DSP awake at its
+    /// top corners the whole time.
+    pub fn burst(&self) -> Result<BurstVote<'_>> {
+        Ok(BurstVote { backend: self.backend, id: vote_burst(self.backend)?, _session: std::marker::PhantomData })
+    }
+}
+
+/// A burst vote on the HTP, held until dropped. Borrows its [`Session`], so it cannot
+/// outlive the device it votes on.
+pub struct BurstVote<'s> {
+    backend: &'s Backend,
+    id: u32,
+    _session: std::marker::PhantomData<&'s ()>,
+}
+
+impl Drop for BurstVote<'_> {
+    fn drop(&mut self) {
+        let Ok(perf) = perf_infrastructure(self.backend) else { return };
+        let Some(destroy) = perf.destroyPowerConfigId else { return };
+        let rc = unsafe { destroy(self.id) };
+        if !ok(rc) {
+            log::warn!("qnn-rs: destroyPowerConfigId({}) failed (error 0x{rc:x})", self.id);
+        }
+    }
 }
 
 impl Drop for Session<'_> {
@@ -361,6 +390,89 @@ impl<'b> Context<'b> {
         }
         Ok(out)
     }
+
+    /// Run `graph_name` on caller-owned buffers holding each tensor's own
+    /// little-endian element type: nothing is quantized, converted or allocated
+    /// per tensor. Every graph input and output must be bound, at exactly its
+    /// byte size. For autoregressive loops that feed one run's outputs into the
+    /// next (KV caches), where a round trip through f32 costs more than the graph.
+    pub fn execute_raw(&self, graph_name: &str, inputs: &[(&str, &[u8])], outputs: &mut [(&str, &mut [u8])]) -> Result<()> {
+        let graph = self
+            .graphs
+            .iter()
+            .find(|g| g.name == graph_name)
+            .ok_or_else(|| Error::GraphNotFound(graph_name.to_string()))?;
+        let ginfo = self
+            .info
+            .graphs
+            .iter()
+            .find(|g| g.name == graph_name)
+            .ok_or_else(|| Error::GraphNotFound(graph_name.to_string()))?;
+        let graph_execute = self.session.get().backend.ftab.graphExecute.ok_or(Error::MissingFn("graphExecute"))?;
+
+        // Names and dims are borrowed by the tensor structs until graphExecute returns.
+        let in_names = ginfo.inputs.iter().map(|t| cstring(&t.name)).collect::<Result<Vec<_>>>()?;
+        let out_names = ginfo.outputs.iter().map(|t| cstring(&t.name)).collect::<Result<Vec<_>>>()?;
+
+        let mut input_tensors = Vec::with_capacity(ginfo.inputs.len());
+        for (i, t) in ginfo.inputs.iter().enumerate() {
+            let data = inputs.iter().find(|(n, _)| *n == t.name).map(|(_, d)| *d).ok_or_else(|| Error::MissingInput(t.name.clone()))?;
+            let expected = raw_byte_len(t, "input")?;
+            if data.len() as u64 != expected {
+                return Err(Error::ByteSizeMismatch { name: t.name.clone(), expected, got: data.len() });
+            }
+            input_tensors.push(unsafe {
+                make_tensor(
+                    t,
+                    ffi::Qnn_TensorType_t::QNN_TENSOR_TYPE_APP_WRITE,
+                    in_names[i].as_ptr(),
+                    t.dims.as_ptr() as *mut u32,
+                    data.as_ptr() as *mut c_void,
+                    data.len() as u32,
+                )
+            });
+        }
+        let mut output_tensors = Vec::with_capacity(ginfo.outputs.len());
+        for (i, t) in ginfo.outputs.iter().enumerate() {
+            let slot = outputs.iter_mut().find(|(n, _)| *n == t.name).ok_or_else(|| Error::MissingOutput(t.name.clone()))?;
+            let expected = raw_byte_len(t, "output")?;
+            if slot.1.len() as u64 != expected {
+                return Err(Error::ByteSizeMismatch { name: t.name.clone(), expected, got: slot.1.len() });
+            }
+            output_tensors.push(unsafe {
+                make_tensor(
+                    t,
+                    ffi::Qnn_TensorType_t::QNN_TENSOR_TYPE_APP_READ,
+                    out_names[i].as_ptr(),
+                    t.dims.as_ptr() as *mut u32,
+                    slot.1.as_mut_ptr() as *mut c_void,
+                    slot.1.len() as u32,
+                )
+            });
+        }
+
+        let rc = unsafe {
+            graph_execute(
+                graph.handle,
+                input_tensors.as_ptr(),
+                input_tensors.len() as u32,
+                output_tensors.as_mut_ptr(),
+                output_tensors.len() as u32,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        if !ok(rc) {
+            return Err(Error::Qnn { op: "graphExecute", code: rc });
+        }
+        Ok(())
+    }
+}
+
+/// Byte size of `t`'s full buffer in its own element type.
+fn raw_byte_len(t: &TensorInfo, kind: &'static str) -> Result<u64> {
+    let width = t.dtype.byte_width().ok_or_else(|| Error::UnsupportedDataType { kind, name: t.name.clone(), dtype: t.dtype })?;
+    Ok(t.elem_count() * width as u64)
 }
 
 impl Drop for Context<'_> {
@@ -605,6 +717,11 @@ fn dequantize_output(t: &TensorInfo, bytes: &[u8]) -> Result<Vec<f32>> {
 /// (QNN_COMMON_ERROR_GENERAL). The power-config id is intentionally kept alive
 /// so the vote persists for the process. No-op path fails at init on host.
 pub fn set_htp_performance_mode(backend: &Backend) -> Result<()> {
+    vote_burst(backend).map(|_| ())
+}
+
+/// The HTP's perf function table, via `deviceGetInfrastructure`.
+fn perf_infrastructure(backend: &Backend) -> Result<htp::QnnHtpDevice_PerfInfrastructure_t> {
     let get_infra = backend.ftab.deviceGetInfrastructure.ok_or(Error::MissingFn("deviceGetInfrastructure"))?;
 
     let mut device_infra: ffi::QnnDevice_Infrastructure_t = ptr::null_mut();
@@ -620,16 +737,32 @@ pub fn set_htp_performance_mode(backend: &Backend) -> Result<()> {
     if infra.infraType != htp::QNN_HTP_DEVICE_INFRASTRUCTURE_TYPE_PERF {
         return Err(Error::Malformed("HTP infrastructure is not perf type"));
     }
-    let perf = infra.perfInfra;
+    Ok(infra.perfInfra)
+}
+
+/// Create a power config, apply the burst settings to it, and return its id. The vote holds
+/// for as long as the id exists.
+fn vote_burst(backend: &Backend) -> Result<u32> {
+    let perf = perf_infrastructure(backend)?;
     let create = perf.createPowerConfigId.ok_or(Error::MissingFn("createPowerConfigId"))?;
-    let set = perf.setPowerConfig.ok_or(Error::MissingFn("setPowerConfig"))?;
 
     let mut power_config_id: u32 = 0;
     let rc = unsafe { create(0, 0, &mut power_config_id) };
     if !ok(rc) {
         return Err(Error::Qnn { op: "createPowerConfigId", code: rc });
     }
+    // A config that could not be filled in is given back: a caller that votes per run and
+    // is refused every time would otherwise leave one behind per run.
+    apply_burst(&perf, power_config_id).inspect_err(|_| {
+        if let Some(destroy) = perf.destroyPowerConfigId {
+            unsafe { destroy(power_config_id) };
+        }
+    })?;
+    Ok(power_config_id)
+}
 
+fn apply_burst(perf: &htp::QnnHtpDevice_PerfInfrastructure_t, power_config_id: u32) -> Result<()> {
+    let set = perf.setPowerConfig.ok_or(Error::MissingFn("setPowerConfig"))?;
     let latency = htp::QnnHtpPerfInfrastructure_PowerConfig_t {
         option: htp::QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIGOPTION_RPC_CONTROL_LATENCY,
         config: htp::QnnHtpPerfInfrastructure_PowerConfig_union { rpcControlLatencyConfig: 100 },

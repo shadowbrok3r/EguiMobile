@@ -1,0 +1,17 @@
+[package]
+name = "whisper-host"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Standalone on purpose: see src/lib.rs.
+[workspace]
+
+[dependencies]
+local-whisper = { path = "../../crates/local-whisper" }
+local-speaker = { path = "../../crates/local-speaker" }
+ort = "=2.0.0-rc.10"
+
+[profile.dev]
+# The mel front end and the logit rules run per token; unoptimized they dominate a test run.
+opt-level = 2

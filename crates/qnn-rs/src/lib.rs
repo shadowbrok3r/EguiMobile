@@ -33,7 +33,8 @@ mod parse;
 pub mod quant;
 mod types;
 
-pub use device::{prepare_htp_env, set_htp_performance_mode, Context, ContextOpts, Session, TensorIn};
+pub use device::{prepare_htp_env, set_htp_performance_mode, BurstVote, Context, ContextOpts, Session, TensorIn};
+pub use fastrpc::available as fastrpc_available;
 pub use error::{Error, Result};
 pub use loader::{Backend, QnnSystem};
 pub use types::{ContextBinaryInfo, DataType, GraphInfo, ScaleOffset, TensorInfo};

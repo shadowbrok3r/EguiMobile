@@ -1,0 +1,21 @@
+[package]
+name = "local-whisper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "On-device Whisper speech-to-text: log-mel features, timestamp-seeking long-form decoding and the vocabulary are pure and host-testable; the encoder and KV-cache decoder graphs run on the Qualcomm HTP via qnn-rs."
+
+[dependencies]
+log = { workspace = true }
+memmap2 = "0.9"
+# zlib deflate only, for the compression-ratio check that catches repetition loops.
+miniz_oxide = "0.8"
+qnn-rs = { path = "../qnn-rs" }
+# 400-point real FFT for the log-mel front end; pure Rust, so it cross-compiles to the NDK.
+realfft = "3"
+thiserror = "2.0.19"
+
+[[example]]
+name = "whisper_smoke"
+path = "examples/whisper_smoke.rs"

@@ -41,6 +41,12 @@ pub enum Error {
     #[error("tensor '{name}': expected {expected} elements, got {got}")]
     ShapeMismatch { name: String, expected: u64, got: usize },
 
+    #[error("no output buffer provided for tensor '{0}'")]
+    MissingOutput(String),
+
+    #[error("tensor '{name}': expected a {expected}-byte buffer, got {got}")]
+    ByteSizeMismatch { name: String, expected: u64, got: usize },
+
     #[error("unsupported {kind} data type {dtype:?} for tensor '{name}'")]
     UnsupportedDataType { kind: &'static str, name: String, dtype: crate::types::DataType },
 
