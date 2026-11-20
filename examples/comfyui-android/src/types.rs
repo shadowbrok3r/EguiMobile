@@ -524,6 +524,10 @@ pub struct CharacterCard {
     /// Server album id collecting this character's matched images; 0 = none yet.
     #[serde(default)]
     pub album_id: i64,
+    /// Style snippets that originated from this character (outfits, expressions, poses, …). Shown
+    /// globally in the Create Styles comboboxes, grouped under the card's name.
+    #[serde(default)]
+    pub snippets: Vec<StyleSnippet>,
 }
 
 /// Exactly what applying a [`CharacterCard`] changed, so removal reverses it token-for-token.
@@ -616,6 +620,112 @@ impl Params {
         strip_injected(&mut self.negative, &applied.neg_injected);
         let drop: HashSet<&str> = applied.loras.iter().map(String::as_str).collect();
         self.loras.retain(|l| !drop.contains(l.file.as_str()));
+    }
+}
+
+/// One category of reusable prompt snippet, picked from a Create combobox.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SnippetKind {
+    #[default]
+    Outfit,
+    Expression,
+    Pose,
+    CameraAngle,
+    Environment,
+}
+
+impl SnippetKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Outfit => "Outfit",
+            Self::Expression => "Expression",
+            Self::Pose => "Pose",
+            Self::CameraAngle => "Camera angle",
+            Self::Environment => "Environment",
+        }
+    }
+
+    pub fn plural(self) -> &'static str {
+        match self {
+            Self::Outfit => "Outfits",
+            Self::Expression => "Expressions",
+            Self::Pose => "Poses",
+            Self::CameraAngle => "Camera angles",
+            Self::Environment => "Environments",
+        }
+    }
+
+    /// Hint text for the snippet-editor prompt field.
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Outfit => "school uniform, thigh-high socks",
+            Self::Expression => "smug, half-lidded eyes",
+            Self::Pose => "hand on hip, looking back",
+            Self::CameraAngle => "low angle, from below",
+            Self::Environment => "rainy neon street at night",
+        }
+    }
+
+    pub const ALL: &'static [Self] =
+        &[Self::Outfit, Self::Expression, Self::Pose, Self::CameraAngle, Self::Environment];
+}
+
+/// A reusable prompt fragment in one [`SnippetKind`]. Global ones live in [`Settings::style_snippets`];
+/// character-originated ones live on a [`CharacterCard`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct StyleSnippet {
+    pub name: String,
+    #[serde(default)]
+    pub kind: SnippetKind,
+    /// Tokens merged into the positive prompt while selected.
+    #[serde(default)]
+    pub positive: String,
+    /// Tokens merged into the negative prompt while selected.
+    #[serde(default)]
+    pub negative: String,
+}
+
+/// The current combobox selection for one [`SnippetKind`], with the token-for-token undo record so
+/// swapping or clearing reverses it exactly. Mirrors [`AppliedCharacter`] for a single snippet.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AppliedSnippet {
+    pub kind: SnippetKind,
+    /// The selected snippet's name (what the combobox shows).
+    pub name: String,
+    /// Originating character's name, or empty for a global snippet — the combobox grouping key.
+    #[serde(default)]
+    pub origin: String,
+    #[serde(default)]
+    pub pos_injected: String,
+    #[serde(default)]
+    pub neg_injected: String,
+}
+
+impl Params {
+    /// Merge a snippet's tokens into the prompts, recording what changed for [`Self::remove_snippet`].
+    pub fn apply_snippet(
+        &mut self,
+        kind: SnippetKind,
+        name: &str,
+        origin: &str,
+        positive: &str,
+        negative: &str,
+    ) -> AppliedSnippet {
+        let pos = merge_triggers(&mut self.positive, positive, &self.lora_triggers);
+        let neg = merge_triggers(&mut self.negative, negative, "");
+        AppliedSnippet {
+            kind,
+            name: name.to_string(),
+            origin: origin.to_string(),
+            pos_injected: pos,
+            neg_injected: neg,
+        }
+    }
+
+    /// Reverse [`Self::apply_snippet`] token-for-token.
+    pub fn remove_snippet(&mut self, applied: &AppliedSnippet) {
+        strip_injected(&mut self.positive, &applied.pos_injected);
+        strip_injected(&mut self.negative, &applied.neg_injected);
     }
 }
 
@@ -1663,6 +1773,12 @@ pub struct Settings {
     /// Per-character accepted gallery keys; every approval sharpens the match centroid.
     #[serde(default)]
     pub character_approved: std::collections::BTreeMap<String, Vec<String>>,
+    /// Global style snippets (not tied to any character), shown in every Create Styles combobox.
+    #[serde(default)]
+    pub style_snippets: Vec<StyleSnippet>,
+    /// The current per-kind snippet selections, with undo bookkeeping so they survive a restart.
+    #[serde(default)]
+    pub active_snippets: Vec<AppliedSnippet>,
 }
 
 pub fn default_server_output_root() -> String {
@@ -2305,6 +2421,12 @@ mod tests {
             face_prompt: "close-up of Mia's face".into(),
             portrait_key: "user_x/Mia/portrait.png".into(),
             album_id: 7,
+            snippets: vec![StyleSnippet {
+                name: "battle dress".into(),
+                kind: SnippetKind::Outfit,
+                positive: "ornate battle dress, gauntlets".into(),
+                negative: String::new(),
+            }],
         };
         let json = CharacterPack { card: card.clone() }.to_clipboard_json();
         let back = CharacterPack::from_clipboard_json(&json).expect("valid pack");
@@ -2331,6 +2453,58 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&card).unwrap()).unwrap();
         assert_eq!(back.portrait_key, "u/p.png");
         assert_eq!(back.album_id, 3);
+    }
+
+    /// Cards and settings written before style snippets existed still load with empty lists.
+    #[test]
+    fn missing_style_snippets_load_empty() {
+        let old = r#"{"name": "Mia", "identity": "1girl"}"#;
+        let card: CharacterCard = serde_json::from_str(old).expect("old card must deserialize");
+        assert!(card.snippets.is_empty());
+
+        let params = serde_json::to_value(Params::default()).unwrap();
+        let json = serde_json::json!({"server_url": "http://x", "params": params});
+        let s: Settings = serde_json::from_value(json).unwrap();
+        assert!(s.style_snippets.is_empty());
+        assert!(s.active_snippets.is_empty());
+    }
+
+    #[test]
+    fn applying_then_removing_a_snippet_restores_prompts_exactly() {
+        let mut p = Params {
+            positive: "1girl, silver hair".into(),
+            negative: "low quality".into(),
+            lora_triggers: "masterpiece".into(),
+            ..Default::default()
+        };
+        let before = serde_json::to_string(&p).unwrap();
+        let applied = p.apply_snippet(
+            SnippetKind::Outfit,
+            "school uniform",
+            "",
+            "school uniform, pleated skirt",
+            "casual clothes",
+        );
+        assert!(p.positive.contains("school uniform"));
+        assert!(p.negative.contains("casual clothes"));
+        p.remove_snippet(&applied);
+        assert_eq!(serde_json::to_string(&p).unwrap(), before);
+    }
+
+    /// A snippet token already present in the LoRA triggers is not duplicated into the positive.
+    #[test]
+    fn snippet_skips_tokens_already_in_lora_triggers() {
+        let mut p = Params {
+            positive: "1girl".into(),
+            lora_triggers: "smug".into(),
+            ..Default::default()
+        };
+        let applied = p.apply_snippet(SnippetKind::Expression, "smug", "", "smug, blush", "");
+        // "smug" is in lora_triggers, so only "blush" is injected into the positive.
+        assert!(p.positive.contains("blush"));
+        assert_eq!(p.positive.matches("smug").count(), 0);
+        p.remove_snippet(&applied);
+        assert_eq!(p.positive, "1girl");
     }
 
     /// Settings written before the character denied / suggestions maps existed still load empty.

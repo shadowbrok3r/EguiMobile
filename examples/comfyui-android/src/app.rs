@@ -33,7 +33,8 @@ use crate::types::{
     CreatePreset, FALLBACK_SAMPLERS, FALLBACK_SCHEDULERS, Facets, FontSizes, GalleryGroup,
     GalleryItem, GalleryMedia, GallerySort, GalleryView, Img2ImgSource, LoraCatalog, LoraPack, Mode,
     TrashItem,
-    ModelKind, Params, PromptHist, RatingFilter, SamplerPack, Settings, append_negatives,
+    ModelKind, Params, PromptHist, RatingFilter, SamplerPack, Settings, SnippetKind, StyleSnippet,
+    AppliedSnippet, append_negatives,
     checkpoint_family, fallback_vec, file_basename, merge_triggers, push_prompt_hist, strip_injected,
 };
 #[cfg(feature = "local-npu")]
@@ -78,6 +79,7 @@ enum CreatePane {
     Enhance,
     Presets,
     Characters,
+    Styles,
 }
 
 /// An in-progress character edit: which card is being replaced (by name), plus the working copy.
@@ -740,6 +742,15 @@ struct ComfyApp {
     /// After creating a character's collection album, stamp its id onto the card and add these
     /// items: `(card name, album name, items)`.
     char_album_pending: Option<(String, String, Vec<(String, String)>)>,
+    /// Character whose album the next generation's outputs auto-join; captured at queue time so a
+    /// mid-run character swap can't misfile the results. Consumed once the burst is collected.
+    pending_album_character: Option<String>,
+    /// Global style snippets (outfits, expressions, …) not tied to any character.
+    style_snippets: Vec<StyleSnippet>,
+    /// Current per-kind snippet selections, with undo bookkeeping (at most one per kind).
+    active_snippets: Vec<AppliedSnippet>,
+    /// Open global-snippet manager window, filtered to this kind (from a combobox's Manage entry).
+    styles_window: Option<SnippetKind>,
     /// Builtin enhance apps plus any under `{documents}/comfyui/apps`.
     apps: Arc<AppSet>,
     /// Where a picked app goes: the Create chain, or the canvas at a graph position.
@@ -1371,6 +1382,10 @@ impl ComfyApp {
             character_approved: std::collections::BTreeMap::new(),
             character_centroids: HashMap::new(),
             char_album_pending: None,
+            pending_album_character: None,
+            style_snippets: Vec::new(),
+            active_snippets: Vec::new(),
+            styles_window: None,
             apps: Arc::new(AppSet::builtin()),
             app_picker: None,
             app_filter: String::new(),
@@ -2320,6 +2335,9 @@ impl ComfyApp {
                 self.preview = None;
                 self.finish_pending = false;
                 self.my_prompts.clear();
+                // A cancelled character run produced nothing to file; drop the pending capture so a
+                // later unrelated run's outputs don't inherit it.
+                self.pending_album_character = None;
                 // A cancelled run left no completed cache entry — an identical retry genuinely
                 // re-generates, so it must not trip the duplicate guard.
                 self.last_graph_fp = None;
@@ -2341,6 +2359,9 @@ impl ComfyApp {
                 if self.jobs_left == 0 {
                     self.running = false;
                     self.finish_pending = false;
+                    // Nothing landed; drop any character auto-album capture so it can't attach to a
+                    // later run.
+                    self.pending_album_character = None;
                     // A failed overnight batch used to die silently — the finish notification
                     // exists, so its failure counterpart must too. Once per drain, not per job.
                     host.notify("ComfyUI", &format!("Generation failed: {}", elide(&e, 90)));
@@ -2424,8 +2445,14 @@ impl ComfyApp {
                 if self.triage_collect > 0 && page.offset == 0 {
                     self.triage_collect -= 1;
                     self.collect_untriaged();
+                    // Fire once the burst is in (new keys found, or the final retry gave up), so a
+                    // character generation's outputs auto-join its album exactly once.
+                    let settled = !self.untriaged.is_empty() || self.triage_collect == 0;
                     if !self.untriaged.is_empty() {
                         self.triage_collect = 0;
+                    }
+                    if settled {
+                        self.autoadd_untriaged_to_character_album();
                     }
                 }
                 self.gallery_status.clear();
@@ -3010,6 +3037,9 @@ impl ComfyApp {
             host.haptic(Haptic::Warning);
             return;
         }
+        // Generating with a character applied: its outputs auto-join that character's album once
+        // the post-burst refresh lists them. Captured now so a mid-run swap can't misfile them.
+        self.pending_album_character = self.active_character.as_ref().map(|a| a.name.clone());
         let n = self.queue_variants.clamp(1, 8);
         let base_seed = self.params.seed;
         let restore_seed = !self.params.randomize_seed;
@@ -3128,6 +3158,9 @@ impl ComfyApp {
             doc.outputs.clear();
             doc.graph.populate_output_images("none", std::iter::empty());
         }
+        // Graph runs share the post-burst collect path but are never a character generation; a
+        // stale capture from an earlier cancelled/errored Create run must not file these outputs.
+        self.pending_album_character = None;
         let n = wf.0.len();
         let fresh = !self.running;
         self.run_seq += 1;
@@ -4011,6 +4044,8 @@ impl ComfyApp {
             character_denied: self.character_denied.clone(),
             character_suggestions: self.character_suggestions.clone(),
             character_approved: self.character_approved.clone(),
+            style_snippets: self.style_snippets.clone(),
+            active_snippets: self.active_snippets.clone(),
         };
         serde_json::to_string_pretty(&settings).ok()
     }
@@ -4066,6 +4101,8 @@ impl ComfyApp {
         self.character_denied = saved.character_denied;
         self.character_suggestions = saved.character_suggestions;
         self.character_approved = saved.character_approved;
+        self.style_snippets = saved.style_snippets;
+        self.active_snippets = saved.active_snippets;
         self.character_centroids.clear();
         self.checkpoint_sort = saved.checkpoint_sort;
         self.checkpoint_favorites = saved.checkpoint_favorites;
@@ -4643,7 +4680,7 @@ impl ComfyApp {
 
     fn create_pane_bar(&mut self, ui: &mut egui::Ui) {
         let prev = self.create_pane;
-        const N: f32 = 6.0;
+        const N: f32 = 7.0;
         const GAP: f32 = 4.0;
         const ROW_H: f32 = 28.0;
         ui.horizontal(|ui| {
@@ -4651,12 +4688,14 @@ impl ComfyApp {
             let btn_w = ((ui.available_width() - GAP * (N - 1.0)) / N).max(28.0);
             let size = egui::vec2(btn_w, ROW_H);
 
-            let panes: [(CreatePane, String, String); 6] = {
+            let panes: [(CreatePane, String, String); 7] = {
                 let model_n = self.checkpoints.len() + self.unets.len();
                 let lora_n = self.params.loras.len();
                 let app_n = self.params.apps.iter().filter(|a| a.enabled).count();
                 let preset_n = self.presets.len();
                 let char_n = self.characters.len();
+                let style_n = self.style_snippets.len()
+                    + self.characters.iter().map(|c| c.snippets.len()).sum::<usize>();
                 [
                     (CreatePane::Main, "Main".into(), "Main".into()),
                     (
@@ -4720,6 +4759,15 @@ impl ComfyApp {
                             "Characters".into()
                         },
                     ),
+                    (
+                        CreatePane::Styles,
+                        if style_n > 0 { format!("Style {style_n}") } else { "Style".into() },
+                        if style_n > 0 {
+                            format!("Style snippets ({style_n})")
+                        } else {
+                            "Style snippets".into()
+                        },
+                    ),
                 ]
             };
 
@@ -4750,6 +4798,7 @@ impl ComfyApp {
             CreatePane::Enhance => self.create_enhance_pane(ui),
             CreatePane::Presets => self.create_presets_pane(ui, host),
             CreatePane::Characters => self.create_characters_pane(ui, host),
+            CreatePane::Styles => self.create_styles_pane(ui),
         }
     }
 
@@ -5822,6 +5871,8 @@ impl ComfyApp {
         if anima {
             ui.weak("Negative only applies when the pack's CFG is above 1.0.");
         }
+
+        self.style_snippet_combos(ui);
 
         self.lint_chips_ui(ui);
 
@@ -6960,7 +7011,7 @@ impl ComfyApp {
         ui.set_max_width(list_w);
 
         if self.character_draft.is_some() {
-            self.character_editor(ui, host, list_w);
+            self.character_editor(ui, list_w);
             return;
         }
 
@@ -7019,12 +7070,8 @@ impl ComfyApp {
             let suggested = self.character_suggestions.get(&card.name).map(|s| s.len()).unwrap_or(0);
             ui.group(|ui| {
                 ui.set_max_width(list_w - 8.0);
+                // One row: name (left) then Find / suggested / Apply-Remove (right).
                 ui.horizontal(|ui| {
-                    // Profile square on the left; falls back to no square when unset.
-                    if !card.portrait_key.is_empty() {
-                        self.portrait_thumb(ui, &card.portrait_key, 38.0);
-                        ui.add_space(4.0);
-                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if is_active {
                             if ui.small_button("Remove").clicked() {
@@ -7033,29 +7080,35 @@ impl ComfyApp {
                         } else if ui.small_button("Apply").clicked() {
                             act = Some(Act::Apply(i));
                         }
-                        ui.add_space(4.0);
-                        let max_w = (ui.available_width() - 4.0).max(32.0);
-                        let title = elide_width(ui, &sanitize_ui_text(ui, &header), max_w);
-                        ui.strong(title);
+                        if suggested > 0
+                            && ui
+                                .small_button(format!("{} {suggested}", icons::STAR))
+                                .on_hover_text("Review images auto-matched to this character")
+                                .clicked()
+                        {
+                            act = Some(Act::Suggestions(i));
+                        }
+                        if ui
+                            .small_button(icons::SEARCH)
+                            .on_hover_text("Find images — rank the gallery by CLIP similarity, then review")
+                            .clicked()
+                        {
+                            act = Some(Act::Find(i));
+                        }
+                        // Name fills the remaining width, left-aligned.
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            let max_w = (ui.available_width() - 4.0).max(32.0);
+                            let title = elide_width(ui, &sanitize_ui_text(ui, &header), max_w);
+                            ui.strong(title);
+                        });
                     });
                 });
-                ui.horizontal(|ui| {
-                    if ui
-                        .small_button(format!("{} Find images", icons::SEARCH))
-                        .on_hover_text("Rank gallery images by CLIP similarity, then review them")
-                        .clicked()
-                    {
-                        act = Some(Act::Find(i));
-                    }
-                    if suggested > 0
-                        && ui
-                            .small_button(format!("{} {suggested} suggested", icons::STAR))
-                            .on_hover_text("Review images auto-matched to this character")
-                            .clicked()
-                    {
-                        act = Some(Act::Suggestions(i));
-                    }
-                });
+                // Larger profile picture below the action row, using the empty right-side space.
+                if !card.portrait_key.is_empty() {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        self.portrait_thumb(ui, &card.portrait_key, 64.0);
+                    });
+                }
                 egui::CollapsingHeader::new("Details")
                     .id_salt(("character_row", card.name.as_str()))
                     .default_open(false)
@@ -7139,7 +7192,7 @@ impl ComfyApp {
     }
 
     /// The card editor, shown in place of the list while [`Self::character_draft`] is set.
-    fn character_editor(&mut self, ui: &mut egui::Ui, host: &Host, list_w: f32) {
+    fn character_editor(&mut self, ui: &mut egui::Ui, list_w: f32) {
         let Some(mut draft) = self.character_draft.take() else { return };
         let w = list_w - 8.0;
         ui.heading(if draft.editing.is_some() { "Edit character" } else { "New character" });
@@ -7265,27 +7318,56 @@ impl ComfyApp {
             draft.card.loras.remove(i);
         }
 
-        ui.add_space(8.0);
-        let named = !draft.card.name.trim().is_empty();
-        let mut close = false;
-        ui.horizontal(|ui| {
-            if ui.add_enabled(named, egui::Button::new(format!("{} Save", icons::SAVE))).clicked() {
-                let mut card = draft.card.clone();
-                card.name = card.name.trim().to_string();
-                self.save_character(draft.editing.clone(), card);
-                host.haptic(Haptic::Success);
-                close = true;
-            }
-            if ui.button("Cancel").clicked() {
-                close = true;
-            }
-        });
-        if !named {
+        ui.add_space(6.0);
+        ui.separator();
+        ui.label(format!("Styles ({})", draft.card.snippets.len()));
+        ui.weak("Outfits, expressions, poses, camera angles, environments for this character. They show in every Create → Styles combobox, grouped under this name.");
+        snippet_list_editor(ui, &mut draft.card.snippets, None, w, "char_snips");
+
+        if draft.card.name.trim().is_empty() {
+            ui.add_space(6.0);
             ui.weak("Name the character to save.");
         }
-        if !close {
-            self.character_draft = Some(draft);
-        }
+        // Save / Cancel live in the fixed bottom bar (character_edit_action_bar), reachable while
+        // this form scrolls.
+        ui.add_space(16.0);
+        self.character_draft = Some(draft);
+    }
+
+    /// Fixed Save / Cancel bar for the character editor, shown as a bottom panel so it stays put
+    /// while the form scrolls. Icon buttons; Android Back also triggers Cancel.
+    fn character_edit_action_bar(&mut self, ui: &mut egui::Ui, host: &Host) {
+        let named =
+            self.character_draft.as_ref().is_some_and(|d| !d.card.name.trim().is_empty());
+        ui.horizontal(|ui| {
+            if ui
+                .add_sized(egui::vec2(56.0, 32.0), egui::Button::new(icons::CLOSE))
+                .on_hover_text("Cancel")
+                .clicked()
+            {
+                self.character_draft = None;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(
+                        named,
+                        egui::Button::new(icons::SAVE).min_size(egui::vec2(72.0, 32.0)),
+                    )
+                    .on_hover_text("Save character")
+                    .clicked()
+                {
+                    if let Some(draft) = self.character_draft.take() {
+                        let mut card = draft.card.clone();
+                        card.name = card.name.trim().to_string();
+                        self.save_character(draft.editing.clone(), card);
+                        host.haptic(Haptic::Success);
+                    }
+                }
+                if !named {
+                    ui.weak("Name it to save");
+                }
+            });
+        });
     }
 
     fn import_character(&mut self, host: &Host) {
@@ -7337,42 +7419,60 @@ impl ComfyApp {
         self.touch_checkpoint_recent(file);
     }
 
-    /// Overwrite sampler / steps / cfg / size from `file`'s catalog recommendation, where present.
+    /// Overwrite sampler / steps / cfg / size from `file`'s catalog recommendation, where present,
+    /// then fall back to a family-default sampler so a model switch never silently inherits the
+    /// previous model's sampler (e.g. staying on Anima's `euler` after moving to an SDXL model).
     fn apply_recommended_settings(&mut self, file: &str) {
         // clip_skip is a per-model convention, not a sticky tunable: a model without a catalog
         // recommendation reverts to off rather than inheriting the previous model's skip.
         self.params.clip_skip = 0;
-        let Some(rec) = self
+        let rec = self
             .checkpoint_catalog
             .entry(file)
             .and_then(|e| e.recommended.as_ref())
-            .cloned()
-        else {
-            return;
-        };
-        if let Some(v) = rec.steps {
-            self.params.steps = v;
+            .cloned();
+        let mut sampler_set = false;
+        let mut scheduler_set = false;
+        if let Some(rec) = &rec {
+            if let Some(v) = rec.steps {
+                self.params.steps = v;
+            }
+            if let Some(v) = rec.cfg {
+                self.params.cfg = v;
+            }
+            if let Some(v) = rec.width {
+                self.params.width = v;
+            }
+            if let Some(v) = rec.height {
+                self.params.height = v;
+            }
+            if let Some(name) =
+                rec.sampler.as_ref().and_then(|s| match_sampler_name(s, &self.samplers))
+            {
+                self.params.sampler = name;
+                sampler_set = true;
+            }
+            if let Some(name) =
+                rec.scheduler.as_ref().and_then(|s| match_sampler_name(s, &self.schedulers))
+            {
+                self.params.scheduler = name;
+                scheduler_set = true;
+            }
+            // The catalog has carried clip_skip all along; the workflow finally emits it.
+            if let Some(v) = rec.clip_skip {
+                self.params.clip_skip = v.min(12);
+            }
         }
-        if let Some(v) = rec.cfg {
-            self.params.cfg = v;
-        }
-        if let Some(v) = rec.width {
-            self.params.width = v;
-        }
-        if let Some(v) = rec.height {
-            self.params.height = v;
-        }
-        if let Some(name) = rec.sampler.as_ref().and_then(|s| match_sampler_name(s, &self.samplers)) {
-            self.params.sampler = name;
-        }
-        if let Some(name) =
-            rec.scheduler.as_ref().and_then(|s| match_sampler_name(s, &self.schedulers))
-        {
-            self.params.scheduler = name;
-        }
-        // The catalog has carried clip_skip all along; the workflow finally emits it.
-        if let Some(v) = rec.clip_skip {
-            self.params.clip_skip = v.min(12);
+        // A known family whose catalog left the sampler blank still re-seeds it, so it swaps on
+        // every model change rather than sticking to the last model's pick.
+        let family = crate::types::checkpoint_family(self.checkpoint_catalog.entry(file));
+        if let Some((s, sch)) = family_default_sampler(file, &family) {
+            if !sampler_set && let Some(name) = match_sampler_name(s, &self.samplers) {
+                self.params.sampler = name;
+            }
+            if !scheduler_set && let Some(name) = match_sampler_name(sch, &self.schedulers) {
+                self.params.scheduler = name;
+            }
         }
     }
 
@@ -7380,6 +7480,7 @@ impl ComfyApp {
     /// model's recommended settings (or the selected local pack's defaults).
     fn reset_create(&mut self, host: &Host) {
         self.remove_active_character();
+        self.active_snippets.clear();
         self.params.reset_creative();
         self.picked_input = None;
         self.picked_input_grid_open = false;
@@ -7514,13 +7615,24 @@ impl ComfyApp {
     /// Empty option lists mean "not connected yet", never "the server has none": those fields are
     /// left untouched rather than blanked, so an offline preset load keeps its saved companions.
     fn resolve_companions(&mut self, mode: Companions) {
+        let model = self.params.model_file().to_string();
         let rec = self
             .checkpoint_catalog
-            .entry(self.params.model_file())
+            .entry(&model)
             .and_then(|e| e.recommended.as_ref())
             .cloned()
             .unwrap_or_default();
-        let bases = self.model_bases_for(self.params.model_file());
+        let family = crate::types::checkpoint_family(self.checkpoint_catalog.entry(&model));
+        let fam_req = family_companions(&model, &family);
+        let mut bases = self.model_bases_for(&model);
+        // No catalog base tags: derive hints from the family label + the filename so companion
+        // matching still bites (an Anima model with no catalog entry still finds a qwen VAE).
+        if bases.is_empty() {
+            if family != "Other" {
+                bases.push(family.clone());
+            }
+            bases.push(file_basename(&model).to_string());
+        }
         let seeding = mode == Companions::Seed;
 
         let clips = self.clip_files.clone();
@@ -7555,28 +7667,36 @@ impl ComfyApp {
         let vaes = self.vaes.clone();
         if !vaes.is_empty() {
             let hint = rec.vae.as_deref().and_then(|n| installed_match(n, &vaes));
+            let fam_vae = fam_req.vae.and_then(|s| best_by_bases(&vaes, &[s.to_string()]));
             let current = installed_match(&self.params.vae_name, &vaes);
-            let (first, second) = if seeding { (hint, current) } else { (current, hint) };
-            self.params.vae_name = first
-                .or(second)
-                .or_else(|| best_by_bases(&vaes, &bases))
-                .or_else(|| self.schemas_enum_default("VAELoader", "vae_name", &vaes))
-                .or_else(|| (vaes.len() == 1).then(|| vaes[0].clone()))
-                .unwrap_or_default();
+            // On a fresh pick the family's required VAE and base-match beat the leftover from the
+            // previous model — otherwise switching to Anima kept the old Wan VAE. On Repair the
+            // selection is the user's own and wins.
+            self.params.vae_name = if seeding {
+                hint.or(fam_vae).or_else(|| best_by_bases(&vaes, &bases)).or(current)
+            } else {
+                current.or(hint).or(fam_vae).or_else(|| best_by_bases(&vaes, &bases))
+            }
+            .or_else(|| self.schemas_enum_default("VAELoader", "vae_name", &vaes))
+            .or_else(|| (vaes.len() == 1).then(|| vaes[0].clone()))
+            .unwrap_or_default();
         }
 
-        // Deliberately not base-matched: the proven Anima graph uses `stable_diffusion` even
-        // though its encoder is Qwen3, so name overlap would pick the wrong type.
+        // Encoder architecture: known families force their type (Anima/Qwen → qwen_image, Wan → wan)
+        // so a leftover from another family can't linger; only then fall back to the enum default.
         let types = self.clip_types.clone();
         if !types.is_empty() {
             let hint = rec.clip_type.as_deref().and_then(|n| installed_match(n, &types));
+            let fam_ty = fam_req.clip_type.and_then(|s| installed_match(s, &types));
             let current = installed_match(&self.params.clip_type, &types);
-            let (first, second) = if seeding { (hint, current) } else { (current, hint) };
-            self.params.clip_type = first
-                .or(second)
-                .or_else(|| self.schemas_enum_default("CLIPLoader", "type", &types))
-                .or_else(|| installed_match("stable_diffusion", &types))
-                .unwrap_or_default();
+            self.params.clip_type = if seeding {
+                hint.or(fam_ty).or(current)
+            } else {
+                current.or(hint).or(fam_ty)
+            }
+            .or_else(|| self.schemas_enum_default("CLIPLoader", "type", &types))
+            .or_else(|| installed_match("stable_diffusion", &types))
+            .unwrap_or_default();
         }
 
         let dtypes = self.weight_dtypes.clone();
@@ -9041,6 +9161,12 @@ impl ComfyApp {
 
     /// Write only the `sel`-enabled fields of `meta` into Params; unchecked slots keep their value.
     fn apply_image_meta_sel(&mut self, meta: &ImageMeta, sel: RemixApply) {
+        // Reverse any applied snippets first, off the *current* prompt. A remix that keeps (rather
+        // than replaces) the positive/negative would otherwise leave their tokens behind with no
+        // bookkeeping to strip them — orphaned and unremovable from the combobox.
+        for applied in std::mem::take(&mut self.active_snippets) {
+            self.params.remove_snippet(&applied);
+        }
         // A UNET in the graph means the diffusion topology; the image's own encoders and VAE beat
         // whatever select_model would have seeded.
         if sel.model {
@@ -9575,35 +9701,54 @@ impl ComfyApp {
                 if total == 0 {
                     ui.weak("The server queue is empty.");
                 } else {
-                    ui.weak(format!("{total} job(s) on the server."));
+                    ui.weak(format!("{total} job(s) on the server. Tap a row for details."));
                     ui.add_space(4.0);
-                    crate::theme::scroll_vertical().show(ui, |ui| {
-                        ui.set_max_height(max_h);
+                    crate::theme::scroll_vertical().max_height(max_h).show(ui, |ui| {
                         ui.set_min_width(320.0);
-                        let mut pos = 0usize;
-                        for job in running {
-                            pos += 1;
-                            ui.horizontal(|ui| {
-                                ui.strong(format!("{pos}."));
-                                ui.colored_label(
-                                    egui::Color32::from_rgb(120, 200, 140),
-                                    "Running",
-                                );
-                                ui.label(elide(&row_label(job), 32));
-                                if ui.small_button("Cancel").clicked() {
-                                    act = Some(QAct::Interrupt);
-                                }
-                            });
-                        }
-                        for job in pending {
-                            pos += 1;
-                            ui.horizontal(|ui| {
-                                ui.strong(format!("{pos}."));
-                                ui.label(elide(&row_label(job), 40));
-                                if ui.small_button("Cancel").clicked() {
-                                    act = Some(QAct::Delete(job.prompt_id.clone()));
-                                }
-                            });
+                        let jobs = running
+                            .iter()
+                            .map(|j| (j, true))
+                            .chain(pending.iter().map(|j| (j, false)));
+                        for (pos, (job, is_running)) in jobs.enumerate() {
+                            let n = pos + 1;
+                            let title = queue_job_title(job, &labels);
+                            egui::CollapsingHeader::new(format!("{n}. {}", elide(&title, 34)))
+                                .id_salt(("queue_job", job.prompt_id.as_str()))
+                                .default_open(is_running)
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        if is_running {
+                                            ui.colored_label(
+                                                egui::Color32::from_rgb(120, 200, 140),
+                                                "Running",
+                                            );
+                                        } else {
+                                            ui.weak("Pending");
+                                        }
+                                        ui.weak(elide(&row_label(job), 26));
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if ui
+                                                    .small_button(format!("{} Cancel", icons::CLOSE))
+                                                    .clicked()
+                                                {
+                                                    act = if is_running {
+                                                        Some(QAct::Interrupt)
+                                                    } else {
+                                                        Some(QAct::Delete(job.prompt_id.clone()))
+                                                    };
+                                                }
+                                            },
+                                        );
+                                    });
+                                    match &job.meta {
+                                        Some(meta) => queue_meta_body(ui, meta),
+                                        None => {
+                                            ui.weak("No embedded metadata for this job.");
+                                        }
+                                    }
+                                });
                         }
                     });
                 }
@@ -9699,6 +9844,9 @@ impl ComfyApp {
     fn apply_preset(&mut self, name: &str) {
         if let Some(p) = self.presets.iter().find(|p| p.name == name) {
             self.params = p.params.clone();
+            // The preset's prompts replace the current ones wholesale; any active snippet
+            // bookkeeping now points at tokens that are gone.
+            self.active_snippets.clear();
             self.params.loras = dedupe_loras(std::mem::take(&mut self.params.loras));
             // Picked device-photo bytes are session-only; a preset can't carry them.
             if self.params.img2img_source == Img2ImgSource::Picked {
@@ -9996,6 +10144,191 @@ impl ComfyApp {
         // that is out of scope here (the server's trainer node inventory is unknown).
     }
 
+    /// If the just-finished generation ran with a character applied, add its new outputs to that
+    /// character's collection album (creating it on first use). Consumes the queue-time capture.
+    fn autoadd_untriaged_to_character_album(&mut self) {
+        let Some(name) = self.pending_album_character.take() else { return };
+        if !self.characters.iter().any(|c| c.name == name) {
+            return;
+        }
+        let fresh: HashSet<String> = self.untriaged.iter().cloned().collect();
+        let items: Vec<(String, String)> = self
+            .gallery
+            .iter()
+            .filter(|it| !it.is_video && fresh.contains(&it.key()))
+            .map(|it| (it.subfolder.clone(), it.filename.clone()))
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        self.add_to_character_album(&name, items);
+    }
+
+    /// Apply a snippet selection for `kind`: reverse the current one, then inject the new choice.
+    /// `choice` is `None` to clear, or `Some((name, origin))` with `origin` the character name (or
+    /// empty for a global snippet).
+    fn set_snippet(&mut self, kind: SnippetKind, choice: Option<(String, String)>) {
+        if let Some(pos) = self.active_snippets.iter().position(|a| a.kind == kind) {
+            let applied = self.active_snippets.remove(pos);
+            self.params.remove_snippet(&applied);
+        }
+        if let Some((name, origin)) = choice {
+            if let Some((pos, neg)) = self.snippet_tokens(kind, &name, &origin) {
+                let applied = self.params.apply_snippet(kind, &name, &origin, &pos, &neg);
+                self.active_snippets.push(applied);
+            }
+        }
+        self.selected_preset.clear();
+    }
+
+    /// The `(positive, negative)` tokens for a snippet by kind + name + origin (empty = global).
+    fn snippet_tokens(&self, kind: SnippetKind, name: &str, origin: &str) -> Option<(String, String)> {
+        let snip = if origin.is_empty() {
+            self.style_snippets.iter().find(|s| s.kind == kind && s.name == name)
+        } else {
+            self.characters
+                .iter()
+                .find(|c| c.name == origin)
+                .and_then(|c| c.snippets.iter().find(|s| s.kind == kind && s.name == name))
+        }?;
+        Some((snip.positive.clone(), snip.negative.clone()))
+    }
+
+    /// The Create-Main Styles section: one combobox per [`SnippetKind`]. Starts collapsed until
+    /// there is something to pick (a snippet exists, or one is already applied).
+    fn style_snippet_combos(&mut self, ui: &mut egui::Ui) {
+        let has_any = !self.style_snippets.is_empty()
+            || !self.active_snippets.is_empty()
+            || self.characters.iter().any(|c| !c.snippets.is_empty());
+        egui::CollapsingHeader::new("Styles")
+            .id_salt("create_styles")
+            .default_open(has_any)
+            .show(ui, |ui| {
+                for &kind in SnippetKind::ALL {
+                    self.snippet_combo(ui, kind);
+                }
+            });
+    }
+
+    /// One labelled snippet combobox: global snippets first, then character-originated ones grouped
+    /// under each card's name, and a Manage entry for the global list.
+    fn snippet_combo(&mut self, ui: &mut egui::Ui, kind: SnippetKind) {
+        let cur: Option<(String, String)> = self
+            .active_snippets
+            .iter()
+            .find(|a| a.kind == kind)
+            .map(|a| (a.name.clone(), a.origin.clone()));
+        let sel_text = match &cur {
+            Some((n, _)) => elide(n, 20),
+            None => "None".to_string(),
+        };
+        let mut pick: Option<Option<(String, String)>> = None;
+        let mut manage = false;
+        ui.horizontal(|ui| {
+            ui.add_sized(egui::vec2(92.0, 20.0), egui::Label::new(kind.label()));
+            let combo_w = (ui.available_width() - 4.0).max(120.0);
+            egui::ComboBox::from_id_salt(("snippet_combo", kind))
+                .selected_text(sanitize_ui_text(ui, &sel_text))
+                .width(combo_w)
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(cur.is_none(), "None").clicked() {
+                        pick = Some(None);
+                    }
+                    let mut first_global = true;
+                    for s in self.style_snippets.iter().filter(|s| s.kind == kind) {
+                        if first_global {
+                            ui.separator();
+                            ui.weak("Global");
+                            first_global = false;
+                        }
+                        let is_sel = cur.as_ref().is_some_and(|(n, o)| o.is_empty() && n == &s.name);
+                        let label = sanitize_ui_text(ui, &elide(&s.name, 30));
+                        if ui.selectable_label(is_sel, label).clicked() {
+                            pick = Some(Some((s.name.clone(), String::new())));
+                        }
+                    }
+                    for card in &self.characters {
+                        let mut first = true;
+                        for s in card.snippets.iter().filter(|s| s.kind == kind) {
+                            if first {
+                                ui.separator();
+                                ui.weak(sanitize_ui_text(ui, &elide(&card.name, 24)));
+                                first = false;
+                            }
+                            let is_sel =
+                                cur.as_ref().is_some_and(|(n, o)| o == &card.name && n == &s.name);
+                            let label = sanitize_ui_text(ui, &elide(&s.name, 30));
+                            if ui.selectable_label(is_sel, label).clicked() {
+                                pick = Some(Some((s.name.clone(), card.name.clone())));
+                            }
+                        }
+                    }
+                    ui.separator();
+                    if ui
+                        .button(format!("{} Manage {}", icons::STYLUS, kind.plural().to_lowercase()))
+                        .clicked()
+                    {
+                        manage = true;
+                    }
+                });
+        });
+        if let Some(choice) = pick {
+            self.set_snippet(kind, choice);
+        }
+        if manage {
+            self.styles_window = Some(kind);
+        }
+    }
+
+    /// The Styles Create pane: manage the global snippet library.
+    fn create_styles_pane(&mut self, ui: &mut egui::Ui) {
+        let w = (ui.clip_rect().width() - 12.0).clamp(160.0, ui.available_width());
+        ui.set_max_width(w);
+        ui.weak("Reusable prompt snippets, picked from the Create → Main Styles comboboxes. These are global; per-character snippets live on each character card.");
+        ui.add_space(4.0);
+        snippet_list_editor(ui, &mut self.style_snippets, None, w - 8.0, "styles_pane");
+    }
+
+    /// The global-snippet manager window opened from a combobox's Manage entry (filtered to a kind).
+    fn styles_window(&mut self, ctx: &egui::Context) {
+        let Some(kind) = self.styles_window else { return };
+        let mut open = true;
+        centered(ctx, egui::Window::new(format!("Manage {}", kind.plural().to_lowercase())))
+            .collapsible(false)
+            .open(&mut open)
+            .default_width(360.0)
+            .show(ctx, |ui| {
+                ui.weak("Global snippets — available in every character's Styles combobox.");
+                ui.add_space(4.0);
+                crate::theme::scroll_vertical().max_height(360.0).show(ui, |ui| {
+                    snippet_list_editor(ui, &mut self.style_snippets, Some(kind), 320.0, "styles_win");
+                });
+            });
+        if !open {
+            self.styles_window = None;
+        }
+    }
+
+    /// Clear every gallery filter and search, restoring the default sort and grouping. Layout
+    /// preferences (columns, header open state) are left alone.
+    fn reset_gallery_filters(&mut self) {
+        self.gallery_view.model.clear();
+        self.gallery_view.lora.clear();
+        self.gallery_view.album = None;
+        self.gallery_view.media = GalleryMedia::All;
+        self.gallery_view.rating = RatingFilter::All;
+        self.gallery_view.sort = GallerySort::Newest;
+        self.gallery_view.group = GalleryGroup::Folder;
+        self.index_filter = 0;
+        self.gallery_q.clear();
+        // The Tags window's client-side facet + tag-search layer is part of "filters" too.
+        self.tag_q.clear();
+        self.tag_facets.clear();
+        self.ranked = None;
+        #[cfg(feature = "local-npu")]
+        self.clear_semantic_ranked();
+    }
+
     /// A character's cached CLIP centroid, computed from its seeds on a cache miss.
     #[cfg(feature = "local-npu")]
     fn character_centroid_cached(&mut self, card: &CharacterCard) -> Option<Vec<f32>> {
@@ -10287,6 +10620,14 @@ impl ComfyApp {
             self.create_pane_bar(ui);
             ui.add_space(2.0);
         });
+        // Fixed Save/Cancel bar while editing a character, so it survives the form scrolling.
+        if self.create_pane == CreatePane::Characters && self.character_draft.is_some() {
+            egui::Panel::bottom("char-edit-actions").show(ui, |ui| {
+                ui.add_space(3.0);
+                self.character_edit_action_bar(ui, host);
+                ui.add_space(3.0);
+            });
+        }
 
         let pane = ui.available_rect_before_wrap();
         self.scroll_focus_into_view(ui);
@@ -12317,6 +12658,18 @@ impl ComfyApp {
                         .filter_map(|i| self.gallery.get(i).map(|it| it.key()))
                         .collect();
                     self.open_triage_keys(keys, host);
+                }
+                ui.separator();
+
+                if ui
+                    .button(format!("{} Reset filters & sort", icons::UNDO))
+                    .on_hover_text(
+                        "Clear model/LoRA/album/media/rating filters and search, and restore the default sort & grouping",
+                    )
+                    .clicked()
+                {
+                    self.reset_gallery_filters();
+                    changed = true;
                 }
                 ui.separator();
 
@@ -16746,6 +17099,17 @@ impl EguiApp for ComfyApp {
             })
         {
             self.error_modal = None;
+        } else if self.tab == Tab::Generate
+            && self.create_pane == CreatePane::Characters
+            && self.character_draft.is_some()
+            && ui.ctx().input_mut(|i| {
+                i.consume_key(egui::Modifiers::NONE, egui::Key::BrowserBack)
+                    || i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+            })
+        {
+            // Back is Cancel while editing a character (matches the bottom-bar Cancel).
+            self.character_draft = None;
+            host.haptic(Haptic::Light);
         }
 
         // Inpaint takes over the whole screen, above the tabs, until closed.
@@ -16754,6 +17118,7 @@ impl EguiApp for ComfyApp {
                 .frame(egui::Frame::NONE)
                 .show(ui, |ui| self.inpaint_overlay(ui, host));
             self.error_modal_window(ui.ctx(), host);
+            self.tick_click_haptic(ui.ctx(), host);
             self.end_frame(frame_start, thread_start_ms, msgs_ms, bg_ms, bg_top, "inpaint");
             return;
         }
@@ -16775,6 +17140,7 @@ impl EguiApp for ComfyApp {
             if self.running || self.queue_remaining > 0 {
                 ui.ctx().request_repaint_after(Duration::from_millis(200));
             }
+            self.tick_click_haptic(ui.ctx(), host);
             self.end_frame(frame_start, thread_start_ms, msgs_ms, bg_ms, bg_top, "graph*");
             return;
         }
@@ -16856,6 +17222,7 @@ impl EguiApp for ComfyApp {
         self.confirm_window(ui.ctx(), host);
         self.dup_run_window(ui.ctx(), host);
         self.dup_create_window(ui.ctx(), host);
+        self.styles_window(ui.ctx());
         self.error_modal_window(ui.ctx(), host);
 
         // Keep the server-wide queue in view even when jobs were started on the website. Poll faster
@@ -16879,11 +17246,32 @@ impl EguiApp for ComfyApp {
             Tab::Gallery => "gallery",
             Tab::Settings => "settings",
         };
+        self.tick_click_haptic(ui.ctx(), host);
         self.end_frame(frame_start, thread_start_ms, msgs_ms, bg_ms, bg_top, tab);
     }
 }
 
 impl ComfyApp {
+    /// A light haptic tick on any widget click this frame (buttons, selectables, menu items, …),
+    /// so every tappable control gives feedback without wiring each call site. egui records a
+    /// `Clicked` output event per click unconditionally; value-changes (sliders/text) don't buzz.
+    /// Semantic haptics elsewhere (Success/Warning/Error) still fire on top for important actions.
+    fn tick_click_haptic(&self, ctx: &egui::Context, host: &Host) {
+        let clicked = ctx.output(|o| {
+            o.events.iter().any(|e| {
+                matches!(
+                    e,
+                    egui::output::OutputEvent::Clicked(_)
+                        | egui::output::OutputEvent::DoubleClicked(_)
+                        | egui::output::OutputEvent::TripleClicked(_)
+                )
+            })
+        });
+        if clicked {
+            host.haptic(Haptic::Light);
+        }
+    }
+
     /// Feed one finished frame's timing to the profiler (mirrors to logcat when slow).
     fn end_frame(
         &mut self,
@@ -18008,6 +18396,68 @@ fn strip_simple_html(s: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The queue-row title: the job's checkpoint/diffusion-model basename, else its "Yours · label"
+/// or prompt-id fallback.
+fn queue_job_title(job: &QueueJob, labels: &HashMap<&str, &str>) -> String {
+    if let Some(m) = &job.meta {
+        let model = m.unet.clone().or_else(|| m.models.first().cloned()).unwrap_or_default();
+        if !model.trim().is_empty() {
+            return file_basename(&model).to_string();
+        }
+    }
+    match labels.get(job.prompt_id.as_str()) {
+        Some(l) => format!("Yours · {l}"),
+        None => job.prompt_id.chars().take(8).collect(),
+    }
+}
+
+/// Full metadata for one queued job, shown when its collapsing row is expanded.
+fn queue_meta_body(ui: &mut egui::Ui, meta: &crate::gallery::ImageMeta) {
+    let model = meta.unet.clone().or_else(|| meta.models.first().cloned()).unwrap_or_default();
+    if !model.trim().is_empty() {
+        wrap_meta(ui, "Model", file_basename(&model));
+    }
+    if let Some(p) = meta.positive.as_deref().filter(|s| !s.trim().is_empty()) {
+        wrap_meta(ui, "Prompt", p);
+    }
+    if let Some(n) = meta.negative.as_deref().filter(|s| !s.trim().is_empty()) {
+        wrap_meta(ui, "Negative", n);
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(s) = meta.sampler.as_deref().filter(|s| !s.is_empty()) {
+        parts.push(s.to_string());
+    }
+    if let Some(s) = meta.scheduler.as_deref().filter(|s| !s.is_empty()) {
+        parts.push(s.to_string());
+    }
+    if let Some(v) = meta.steps {
+        parts.push(format!("{v} steps"));
+    }
+    if let Some(v) = meta.cfg {
+        parts.push(format!("CFG {v}"));
+    }
+    if !parts.is_empty() {
+        wrap_meta(ui, "Sampler", &parts.join(", "));
+    }
+    if let Some(v) = meta.seed {
+        wrap_meta(ui, "Seed", &v.to_string());
+    }
+    if let Some(ct) = meta.clip_type.as_deref().filter(|s| !s.is_empty()) {
+        wrap_meta(ui, "Encoder", ct);
+    }
+    if let Some(v) = meta.vae.as_deref().filter(|s| !s.trim().is_empty()) {
+        wrap_meta(ui, "VAE", file_basename(v));
+    }
+    if !meta.loras.is_empty() {
+        let names: Vec<String> = meta
+            .loras
+            .iter()
+            .map(|l| format!("{} @{:.2}", file_basename(&l.name), l.strength_model))
+            .collect();
+        wrap_meta(ui, "LoRAs", &names.join(", "));
+    }
+}
+
 fn preset_meta_body(ui: &mut egui::Ui, preset: &CreatePreset) {
     let p = &preset.params;
     wrap_meta(ui, "Model", p.model_file());
@@ -18064,6 +18514,92 @@ fn character_meta_body(ui: &mut egui::Ui, card: &CharacterCard) {
     if !card.face_prompt.trim().is_empty() {
         wrap_meta(ui, "Face prompt", &card.face_prompt);
     }
+    if !card.snippets.is_empty() {
+        wrap_meta(ui, "Styles", &format!("{} snippet(s)", card.snippets.len()));
+    }
+}
+
+/// Inline editor for a list of [`StyleSnippet`]s, shared by the Styles pane, the per-character
+/// editor, and the combobox Manage window. `only` restricts to a single kind; `None` groups all
+/// kinds under per-kind Add buttons. A row's kind is fixed at creation (by which Add button made it).
+fn snippet_list_editor(
+    ui: &mut egui::Ui,
+    list: &mut Vec<StyleSnippet>,
+    only: Option<SnippetKind>,
+    width: f32,
+    id_scope: &str,
+) {
+    let single;
+    let kinds: &[SnippetKind] = match &only {
+        Some(k) => {
+            single = [*k];
+            &single
+        }
+        None => SnippetKind::ALL,
+    };
+
+    ui.horizontal_wrapped(|ui| {
+        for &k in kinds {
+            if ui
+                .button(format!("{} {}", icons::ADD, k.label()))
+                .on_hover_text(format!("Add a {} snippet", k.label().to_lowercase()))
+                .clicked()
+            {
+                list.push(StyleSnippet { kind: k, ..Default::default() });
+            }
+        }
+    });
+
+    let mut del: Option<usize> = None;
+    for &kind in kinds {
+        if only.is_none() {
+            ui.add_space(4.0);
+            ui.strong(kind.plural());
+            if !list.iter().any(|s| s.kind == kind) {
+                ui.weak("none yet");
+            }
+        }
+        for i in 0..list.len() {
+            if list[i].kind != kind {
+                continue;
+            }
+            let title = if list[i].name.trim().is_empty() {
+                "(unnamed)".to_string()
+            } else {
+                elide(&list[i].name, 30)
+            };
+            let start_open = list[i].name.trim().is_empty();
+            egui::CollapsingHeader::new(sanitize_ui_text(ui, &title))
+                .id_salt((id_scope, i))
+                .default_open(start_open)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut list[i].name)
+                            .hint_text("name")
+                            .desired_width(width),
+                    );
+                    ui.add(
+                        egui::TextEdit::multiline(&mut list[i].positive)
+                            .hint_text(kind.hint())
+                            .desired_rows(2)
+                            .desired_width(width),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut list[i].negative)
+                            .hint_text("optional negatives")
+                            .desired_width(width),
+                    );
+                    if ui.button(format!("{} Delete", icons::TRASH)).clicked() {
+                        del = Some(i);
+                    }
+                });
+        }
+    }
+    if let Some(i) = del {
+        if i < list.len() {
+            list.remove(i);
+        }
+    }
 }
 
 /// Wrapped LoRA catalog fields for a collapsing details body.
@@ -18119,6 +18655,64 @@ fn installed_match(want: &str, options: &[String]) -> Option<String> {
         .iter()
         .find(|o| crate::types::file_basename(o).to_lowercase() == base)
         .cloned()
+}
+
+/// A known model family's required companions, matched against the server's installed lists when
+/// the catalog carries no recommendation. `clip_type` is an exact `CLIPLoader.type`; `vae` a
+/// filename substring.
+struct FamilyReq {
+    clip_type: Option<&'static str>,
+    vae: Option<&'static str>,
+}
+
+/// Hard companion requirements for families with a fixed encoder/VAE, keyed off the catalog family
+/// label and the filename. Empty (`None`/`None`) for families without a strict requirement.
+fn family_companions(model_file: &str, family: &str) -> FamilyReq {
+    let fam = family.to_ascii_lowercase();
+    let name = file_basename(model_file).to_ascii_lowercase();
+    let is = |k: &str| fam.contains(k) || name.contains(k);
+    // Anima's DiT and Qwen-Image both encode through the Qwen tower and pair with the Qwen VAE.
+    if is("anima") || is("qwen") {
+        FamilyReq { clip_type: Some("qwen_image"), vae: Some("qwen") }
+    } else if is("wan") {
+        FamilyReq { clip_type: Some("wan"), vae: Some("wan") }
+    } else if is("flux") {
+        FamilyReq { clip_type: Some("flux"), vae: Some("ae") }
+    } else {
+        FamilyReq { clip_type: None, vae: None }
+    }
+}
+
+/// A sensible `(sampler, scheduler)` default per family, used only when the catalog left them blank
+/// so a model switch re-seeds rather than inheriting. `None` = leave the current pick untouched.
+fn family_default_sampler(model_file: &str, family: &str) -> Option<(&'static str, &'static str)> {
+    let fam = family.to_ascii_lowercase();
+    let name = file_basename(model_file).to_ascii_lowercase();
+    let is = |k: &str| fam.contains(k) || name.contains(k);
+    // Flow-match / rectified-flow families run plain Euler on a simple schedule.
+    if is("anima")
+        || is("flux")
+        || is("qwen")
+        || is("wan")
+        || is("sd 3")
+        || is("sd3")
+        || is("lumina")
+        || is("chroma")
+        || is("hunyuan")
+    {
+        Some(("euler", "simple"))
+    } else if is("sdxl")
+        || is("illustrious")
+        || is("pony")
+        || is("noobai")
+        || is("sd 1.5")
+        || is("sd15")
+        || is("sd 2")
+    {
+        Some(("euler_ancestral", "normal"))
+    } else {
+        None
+    }
 }
 
 /// Split a filename into lowercase alphanumeric tokens of 3+ chars.

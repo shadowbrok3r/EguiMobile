@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::types::{ActiveLora, CharacterCard, GalleryGroup, GalleryItem, Params, file_basename};
 
 /// One LoRA referenced by a gallery image's embedded workflow.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct LoraMeta {
     pub name: String,
     pub strength_model: f64,
@@ -19,7 +19,7 @@ pub struct LoraMeta {
 }
 
 /// Prompt / model summary scraped from an embedded workflow for the viewer header.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ImageMeta {
     pub models: Vec<String>,
     /// `UNETLoader.unet_name` — set when the graph used the diffusion-model topology.
