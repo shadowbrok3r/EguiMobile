@@ -14,7 +14,7 @@ crate-type = ["cdylib", "rlib"]
 egui-mobile = { path = "../../crates/egui-mobile" }
 # Bundles NotoEmoji and emoji-icon-font into the default font chains.
 egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
-egui-icon-pack = { git = "https://github.com/shadowbrok3r/egui-theme-kit", rev = "065ef9f7f42623a78a23f43da44d39696be2cefc", default-features = false, features = ["phosphor-regular"] }
+egui-icon-pack = { git = "https://github.com/shadowbrok3r/egui-theme-kit", rev = "9f055aa2553173d960b64c887f9915039eb644ec", default-features = false, features = ["phosphor-regular"] }
 # Collapsible, syntax-coloured JSON for request and response bodies. Vendored fork of 0.16 —
 # see patches/egui-json-tree; upstream senses drag on every token, which steals the scroll.
 egui_json_tree = { path = "../../patches/egui-json-tree", features = ["serde_json"] }
