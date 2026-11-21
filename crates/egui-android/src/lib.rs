@@ -555,16 +555,18 @@ impl Adapter {
     fn text_actions_bar(&mut self, ui: &egui::Ui, has_focus: bool) {
         let ctx = ui.ctx().clone();
         let anchor = self.host.drv_take_text_actions_anchor();
+        let app_owned = self.host.drv_take_text_actions_hidden();
         let keyboard = self.host.keyboard_height();
         let ime_wanted = ctx.output(|o| o.ime.is_some());
         let guest_kb = crate::host::keyboard_requested();
         let hold = self.bar_touch || self.ime_hold_frames > 0;
         // Hide on click-away: require an active edit signal (IME/focus/guest), not merely a
         // lingering keyboard inset or a sticky flag from a prior bar tap.
-        let show = hold
-            || guest_kb
-            || (ime_wanted && has_focus)
-            || (keyboard > 0.0 && (has_focus || guest_kb));
+        let show = !app_owned
+            && (hold
+                || guest_kb
+                || (ime_wanted && has_focus)
+                || (keyboard > 0.0 && (has_focus || guest_kb)));
         self.text_actions.set_visible(&ctx, show);
         if !show {
             self.next_clip_poll = 0;

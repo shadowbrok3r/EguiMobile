@@ -151,6 +151,7 @@ struct HostState {
     mic_level: f32,
     haptic_cb: Option<extern "C" fn(i32)>,
     text_actions_anchor: Option<egui::Rect>,
+    text_actions_hidden: bool,
 }
 
 /// Cheap clonable handle the app calls from `update`. All methods are main-thread only.
@@ -175,6 +176,7 @@ impl Host {
                 mic_level: 0.0,
                 haptic_cb: None,
                 text_actions_anchor: None,
+                text_actions_hidden: false,
             })),
         }
     }
@@ -292,6 +294,12 @@ impl Host {
     pub fn set_text_actions_anchor(&self, rect: Option<egui::Rect>) {
         self.inner.borrow_mut().text_actions_anchor = rect;
     }
+
+    /// Hide the Android text-actions bar this frame, for a focused field that draws its own
+    /// Cut/Copy/Paste row. Cleared each frame; iOS draws no bar.
+    pub fn set_text_actions_hidden(&self, hidden: bool) {
+        self.inner.borrow_mut().text_actions_hidden = hidden;
+    }
 }
 
 /// Driver API used by the per-platform runtime to drain requests and feed state. Not for apps.
@@ -335,6 +343,11 @@ impl Host {
         self.inner.borrow_mut().text_actions_anchor.take()
     }
 
+    /// Take this frame's [`Host::set_text_actions_hidden`], clearing it for the next.
+    pub fn drv_take_text_actions_hidden(&self) -> bool {
+        std::mem::take(&mut self.inner.borrow_mut().text_actions_hidden)
+    }
+
     pub fn drv_set_keyboard_height(&self, pts: f32) {
         self.inner.borrow_mut().keyboard_height = pts.max(0.0);
     }
@@ -370,5 +383,19 @@ impl Host {
     /// on `kind`.
     pub fn drv_enqueue(&self, kind: i32, a: Option<String>, b: Option<String>, i: i32) {
         self.push(HostRequest::Raw { kind, a, b, i });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Host;
+
+    #[test]
+    fn text_actions_hidden_lasts_one_frame() {
+        let host = Host::new();
+        assert!(!host.drv_take_text_actions_hidden());
+        host.set_text_actions_hidden(true);
+        assert!(host.drv_take_text_actions_hidden());
+        assert!(!host.drv_take_text_actions_hidden());
     }
 }
