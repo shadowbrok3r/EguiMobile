@@ -2,7 +2,7 @@
 
 Companion to `PLAN.md` (what to build now). This is the menu of what the on-device stack could do
 beyond today's SD1.5 and Anima text2img, WD14 tags, CLIP search + aesthetic score, and the CPU
-rewriter. Written 2026-09-04. Starred items are Logan's picks; everything else is wanted too.
+rewriter. Written 2026-09-04. Starred items are shadowbroker's picks; everything else is wanted too.
 
 ## Quick wins with packs already on the phone
 
@@ -170,7 +170,7 @@ path (`qnn_genai_transformer_lora.py`).
 - **Library deliverable**: a `local-signal` crate with windowing, normalization, the classifier
   runner and a pack format for 1D models, so surveyor and WireLab share it.
 
-## Gemma 4 via LiteRT-LM (Logan, 2026-09-04)
+## Gemma 4 via LiteRT-LM (shadowbroker, 2026-09-04)
 
 What the two pages and the surrounding releases say, as of 2026-09-04:
 
