@@ -32,7 +32,7 @@ the app store from CI (`.github/workflows/publish-appstore.yml`) on a push that 
 `version`; PUBLISHING.md has the manual route and the versionCode rule. The signing cert must stay
 `e1ac3c3b9e0720cbce70b272c9d940a58162cb2d703967c76c31bc715c8040f1` (`~/.android/debug.keystore`):
 a different key makes every update fail `INSTALL_FAILED_UPDATE_INCOMPATIBLE`, and the only fix is
-uninstalling the app, which wipes its settings. Both of Logan's build machines share this keystore.
+uninstalling the app, which wipes its settings. Both of shadowbroker's build machines share this keystore.
 
 Build APKs from the crate dir, not the workspace root — cargo-apk2 fails on the virtual manifest
 ("virtual manifests must be configured with [workspace]"). The APK lands in the **workspace**
