@@ -21,7 +21,7 @@ use {
     },
 };
 
-/// Java version javac compiles bytecode for: the newest class files d8 in build-tools 35 reads.
+/// Java version javac compiles bytecode for.
 const JAVA_RELEASE: &str = "17";
 
 pub struct ApkBuilder<'a> {
