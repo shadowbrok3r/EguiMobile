@@ -21,6 +21,9 @@ use {
     },
 };
 
+/// Java version javac compiles bytecode for.
+const JAVA_RELEASE: &str = "17";
+
 pub struct ApkBuilder<'a> {
     cmd: &'a Subcommand,
     ndk: Ndk,
@@ -258,6 +261,8 @@ impl<'a> ApkBuilder<'a> {
         );
         javac
             .stdin(Stdio::null())
+            .arg("--release")
+            .arg(JAVA_RELEASE)
             .arg("-d")
             .arg(&self.classes_dir)
             .arg("-classpath")
