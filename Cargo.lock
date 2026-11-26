@@ -2170,7 +2170,7 @@ dependencies = [
 [[package]]
 name = "egui-icon-pack"
 version = "0.1.0"
-source = "git+https://github.com/shadowbrok3r/egui-theme-kit?rev=db3371ca1a6543c658e1b90b89b1d47057d39c8f#db3371ca1a6543c658e1b90b89b1d47057d39c8f"
+source = "git+https://github.com/shadowbrok3r/egui-theme-kit?rev=79f6dca041913dba7143e9ed8ad2adf9f798aeed#79f6dca041913dba7143e9ed8ad2adf9f798aeed"
 dependencies = [
  "egui",
  "egui-icon-pack-build",
@@ -2181,7 +2181,7 @@ dependencies = [
 [[package]]
 name = "egui-icon-pack-build"
 version = "0.1.0"
-source = "git+https://github.com/shadowbrok3r/egui-theme-kit?rev=db3371ca1a6543c658e1b90b89b1d47057d39c8f#db3371ca1a6543c658e1b90b89b1d47057d39c8f"
+source = "git+https://github.com/shadowbrok3r/egui-theme-kit?rev=79f6dca041913dba7143e9ed8ad2adf9f798aeed#79f6dca041913dba7143e9ed8ad2adf9f798aeed"
 
 [[package]]
 name = "egui-ios"
@@ -2278,7 +2278,7 @@ dependencies = [
 [[package]]
 name = "egui-theme-kit"
 version = "0.1.0"
-source = "git+https://github.com/shadowbrok3r/egui-theme-kit?rev=db3371ca1a6543c658e1b90b89b1d47057d39c8f#db3371ca1a6543c658e1b90b89b1d47057d39c8f"
+source = "git+https://github.com/shadowbrok3r/egui-theme-kit?rev=79f6dca041913dba7143e9ed8ad2adf9f798aeed#79f6dca041913dba7143e9ed8ad2adf9f798aeed"
 dependencies = [
  "anyhow",
  "egui",
