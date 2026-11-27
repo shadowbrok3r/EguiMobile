@@ -6,7 +6,7 @@ license = "MIT OR Apache-2.0"
 description = "Shared Mastertech palette and desktop/touch metrics for egui applications"
 
 [dependencies]
-egui-theme-kit = { git = "https://github.com/shadowbrok3r/egui-theme-kit", rev = "79f6dca041913dba7143e9ed8ad2adf9f798aeed", default-features = false, features = ["controls", "picker"] }
+egui-theme-kit = { git = "https://github.com/shadowbrok3r/egui-theme-kit", rev = "5e803babfb78613551f5e5031dbc2054e4405e59", default-features = false, features = ["controls", "picker"] }
 
 # The preset kit uses eframe types. Host tools/tests need a desktop backend;
 # Android and iOS keep their existing native platform configuration.
